@@ -1,0 +1,21 @@
+name: Build R36S
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bauen (ARM64, alte Ubuntu-Version damit es auf ArkOS laeuft)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src ubuntu:18.04 bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y g++ make libsdl2-dev libgles2-mesa-dev && make"
+      - name: Paket packen
+        run: |
+          mkdir -p pkg/darkrealm
+          cp darkrealm pkg/darkrealm/darkrealm
+          cp darkrealm.sh pkg/darkrealm.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Dark_Realm_R36S
+          path: pkg
