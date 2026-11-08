@@ -272,6 +272,10 @@ static const Fire FIRES[NFIRES] = {
     {-62.0f, -58.0f, "NEBELMOOR"}, {-20.0f, -48.0f, "RASTPLATZ"}, {38.0f, 20.0f, "RASTPLATZ"},
     {80.0f, -35.0f, "RASTPLATZ"} };
 
+static const float GATE_X = 0.0f, GATE_Z = -108.0f;
+static const float BOSS_HP = 50.0f;
+struct Boss { bool active; float x, z, hp, flash; };
+
 static float rawHeight(float x, float z) {
     return 3.0f * sinf(x * 0.08f) * cosf(z * 0.07f) + 1.5f * sinf(x * 0.19f + z * 0.13f) + 0.6f * sinf(z * 0.31f);
 }
@@ -334,14 +338,15 @@ enum Item { IT_POTION, IT_BONE, IT_SHARD, IT_COUNT };
 static const char* ITEM_NAME[IT_COUNT] = {"HEILTRANK", "KNOCHEN", "SEELENSPLITTER"};
 static const char* ITEM_DESC[IT_COUNT] = {"HEILT 40 LEBEN", "EIN ALTER KNOCHEN", "SCHIMMERT SCHWACH VIOLETT"};
 
-static int level = 1, xp = 0, gold = 0, lastFire = 0;
+static int level = 1, xp = 0, gold = 0, lastFire = 0, weaponLvl = 0, gateOpen = 0, tutStep = 0, ended = 0;
+static int qStatus[4] = {0, 0, 0, 0}, qProg[4] = {0, 0, 0, 0};
 static int items[IT_COUNT] = {2, 0, 0};
 static float hp = 100;
 static float px = 0, pz = 0;
 
 static int xpNeed() { return 20 + 20 * (level - 1); }
 static int maxHp() { return 100 + 15 * (level - 1); }
-static int dmgVal() { return 1 + (level - 1) / 3; }
+static int dmgVal() { return 1 + (level - 1) / 3 + weaponLvl; }
 
 static std::vector<std::pair<std::string, float> > msgs;
 static void msg(const std::string& s) {
@@ -364,7 +369,10 @@ static bool saveExists() { FILE* f = fopen(SAVE_FILE, "r"); if (f) { fclose(f); 
 static bool saveGame() {
     FILE* f = fopen(SAVE_FILE, "w");
     if (!f) return false;
-    fprintf(f, "V2 %d %d %d %d %d %d %d %.2f %.2f\n", level, xp, items[0], items[1], items[2], gold, lastFire, px, pz);
+    fprintf(f, "V3 %d %d %d %d %d %d %d %d", level, xp, items[0], items[1], items[2], gold, lastFire, weaponLvl);
+    for (int i = 0; i < 4; i++) fprintf(f, " %d", qStatus[i]);
+    for (int i = 0; i < 4; i++) fprintf(f, " %d", qProg[i]);
+    fprintf(f, " %d %d %d %.2f %.2f\n", gateOpen, tutStep, ended, px, pz);
     fclose(f);
     return true;
 }
@@ -372,20 +380,32 @@ static bool saveGame() {
 static bool loadGame() {
     FILE* f = fopen(SAVE_FILE, "r");
     if (!f) return false;
-    char line[200];
+    char line[300];
     if (!fgets(line, sizeof line, f)) { fclose(f); return false; }
     fclose(f);
-    int l, x, a, b, c, g = 0, lf = 0, n; float X, Z;
-    if (strncmp(line, "V2 ", 3) == 0) {
-        n = sscanf(line + 3, "%d %d %d %d %d %d %d %f %f", &l, &x, &a, &b, &c, &g, &lf, &X, &Z);
-        if (n != 9) return false;
-    } else {
-        n = sscanf(line, "%d %d %d %d %d %f %f", &l, &x, &a, &b, &c, &X, &Z);
-        if (n != 7) return false;
-    }
+    std::vector<std::string> tk;
+    for (char* t = strtok(line, " \n"); t; t = strtok(NULL, " \n")) tk.push_back(t);
+    if (tk.empty()) return false;
+    auto I = [&](size_t i) { return atoi(tk[i].c_str()); };
+    auto F = [&](size_t i) { return (float)atof(tk[i].c_str()); };
+    int l = 1, x = 0, a = 0, b = 0, c = 0, g = 0, lf = 0, wl = 0, go = 0, tu = 5, en = 0;
+    int qs[4] = {0, 0, 0, 0}, qp[4] = {0, 0, 0, 0};
+    float X = 0, Z = 0;
+    if (tk[0] == "V3" && tk.size() == 22) {
+        l = I(1); x = I(2); a = I(3); b = I(4); c = I(5); g = I(6); lf = I(7); wl = I(8);
+        for (int i = 0; i < 4; i++) { qs[i] = I(9 + i); qp[i] = I(13 + i); }
+        go = I(17); tu = I(18); en = I(19); X = F(20); Z = F(21);
+    } else if (tk[0] == "V2" && tk.size() == 10) {
+        l = I(1); x = I(2); a = I(3); b = I(4); c = I(5); g = I(6); lf = I(7); X = F(8); Z = F(9);
+    } else if (tk.size() == 7) {
+        l = I(0); x = I(1); a = I(2); b = I(3); c = I(4); X = F(5); Z = F(6);
+    } else return false;
     level = l < 1 ? 1 : (l > 20 ? 20 : l); xp = x < 0 ? 0 : x;
     items[0] = a; items[1] = b; items[2] = c;
     gold = g < 0 ? 0 : g; lastFire = (lf < 0 || lf >= NFIRES) ? 0 : lf;
+    weaponLvl = wl < 0 ? 0 : wl;
+    for (int i = 0; i < 4; i++) { qStatus[i] = qs[i]; qProg[i] = qp[i]; }
+    gateOpen = go; tutStep = tu; ended = en;
     px = clampf(X, -120.f, 120.f); pz = clampf(Z, -120.f, 120.f);
     hp = (float)maxHp();
     return true;
@@ -412,6 +432,32 @@ static void respawn(Enemy& e, float cx, float cz) {
     }
     e.hp = (float)(3 + (level - 1) / 3); e.flash = 0;
 }
+
+static std::vector<std::string> splitPages(const char* text) {
+    std::vector<std::string> out;
+    std::string t = text;
+    size_t pos = 0;
+    while (true) {
+        size_t e = t.find('|', pos);
+        if (e == std::string::npos) { out.push_back(t.substr(pos)); break; }
+        out.push_back(t.substr(pos, e - pos)); pos = e + 1;
+    }
+    return out;
+}
+
+struct Quest { const char* name; const char* pre; const char* offer; const char* remind; const char* done; const char* after; };
+
+static const char* INTRO_TEXT =
+    "Vor langer Zeit herrschte der Koenig\nueber drei Doerfer und ein Reich aus Licht.|"
+    "Dann zog er in die Schwarze Festung\nund kehrte nie zurueck.|"
+    "Seitdem kriechen die Schatten aus dem\nWald, und nur die Lagerfeuer halten\nsie noch fern.|"
+    "Du bist ein einsamer Ritter.\nDein Weg beginnt an einem kleinen Feuer...";
+
+static const char* OUTRO_TEXT =
+    "Der Schattenkoenig faellt. Das schwarze\nTor zerbricht in tausend Funken.|"
+    "Die Schatten loesen sich im Morgenlicht\nauf, und das Reich atmet wieder.|"
+    "Du bist der Ritter, der das Licht\nzurueckbrachte.|"
+    "DANKE FUERS SPIELEN!";
 
 // ---------- Ritter ----------
 static void drawKnight(const Mesh& cube, float kx, float kz, float face, float step, bool swing, float dmg) {
@@ -440,7 +486,7 @@ static void drawKnight(const Mesh& cube, float kx, float kz, float face, float s
 // ---------- Doerfer ----------
 struct House { float x, z, w, d, h, rot; bool tavern; float cr, cg, cb; };
 struct Collider { float x, z, r; };
-struct Npc { float x, z, face; const char* name; int kind; float cr, cg, cb; std::vector<std::string> pages; };
+struct Npc { float x, z, face; const char* name; int kind; float cr, cg, cb; std::vector<std::string> pages; int quest; };
 
 static void localToWorld(float cx, float cz, float rot, float lx, float lz, float& wx, float& wz) {
     wx = cx + lx * cosf(rot) + lz * sinf(rot);
@@ -489,7 +535,7 @@ static float joyVal(SDL_Joystick* j, int a) {
     return fabsf(v) < 0.2f ? 0.0f : v;
 }
 
-enum State { ST_MENU, ST_PLAY, ST_INV, ST_TALK, ST_TAVERN };
+enum State { ST_MENU, ST_PLAY, ST_INV, ST_TALK, ST_TAVERN, ST_QUESTS, ST_STORY };
 
 int main(int argc, char** argv) {
     bool windowed = false;
@@ -559,6 +605,7 @@ int main(int argc, char** argv) {
             float dx = x - FIRES[f].x, dz = z - FIRES[f].z;
             if (dx * dx + dz * dz < 16.0f) ok = false;
         }
+        { float gx = x - GATE_X, gz = z - GATE_Z; if (gx * gx + gz * gz < 144.0f) ok = false; }
         if (ok) { Tree t; t.x = x; t.z = z; trees.push_back(t); }
     }
     const float bx = 8.0f, bz = -6.0f;   // Lagerfeuer
@@ -585,7 +632,7 @@ int main(int argc, char** argv) {
         }
     }
     auto addNpc = [&](float x, float z, const char* name, int kind, float cr, float cg, float cb, const std::string& text) {
-        Npc n; n.x = x; n.z = z; n.face = 0; n.name = name; n.kind = kind; n.cr = cr; n.cg = cg; n.cb = cb;
+        Npc n; n.x = x; n.z = z; n.face = 0; n.name = name; n.kind = kind; n.cr = cr; n.cg = cg; n.cb = cb; n.quest = -1;
         size_t pos = 0;
         while (true) {
             size_t e = text.find('|', pos);
@@ -615,6 +662,13 @@ int main(int argc, char** argv) {
         addNpc(VILLAGES[v].x + 3.4f, VILLAGES[v].z + 2.6f, V1_NAME[v], 0, 0.20f, 0.30f, 0.50f, V1_TEXT[v]);
         addNpc(VILLAGES[v].x - 3.8f, VILLAGES[v].z - 1.8f, V2_NAME[v], 0, 0.35f, 0.40f, 0.22f, V2_TEXT[v]);
     }
+    npcs[1].quest = 0;   // Marta
+    npcs[4].quest = 1;   // Schmied Torsten
+    npcs[7].quest = 2;   // Moorhexe Irma
+    npcs[2].quest = 3;   // Alter Gregor
+    std::vector<Collider> gateCols;   // Tuer des Schwarzen Tors (solange geschlossen)
+    for (int i = -1; i <= 1; i++) { Collider c; c.x = GATE_X + i * 2.2f; c.z = GATE_Z; c.r = 1.7f; gateCols.push_back(c); }
+    for (int i = -1; i <= 1; i += 2) { Collider c; c.x = GATE_X + i * 4.2f; c.z = GATE_Z; c.r = 1.5f; colliders.push_back(c); }
     float face = 0, yaw = 0, atkCd = 0, swing = 0, tm = 0, walk = 0;
     int nearFireIdx = -1, curVillage = -1, nearNpcIdx = -1;
     int menuSel = 0, invSel = 0, tavernSel = 0, talkNpc = -1, talkPage = 0;
@@ -622,6 +676,11 @@ int main(int argc, char** argv) {
     float drunk = 0;
     std::vector<std::string> curPages;
     std::string curName;
+    bool nearGate = false;
+    float tutDist = 0;
+    int talkEvent = 0, talkQuest = -1, storyEnd = 0;
+    std::vector<std::string> storyPages;
+    Boss boss = {false, 0, 0, 0, 0};
     State state = ST_MENU;
     bool hasSave = saveExists();
     menuSel = hasSave ? 1 : 0;
@@ -630,17 +689,66 @@ int main(int argc, char** argv) {
     auto resetEnemies = [&]() { for (size_t i = 0; i < enemies.size(); i++) respawn(enemies[i], px, pz); };
     auto newGame = [&]() {
         level = 1; xp = 0; items[0] = 2; items[1] = 0; items[2] = 0; gold = 0; lastFire = 0;
+        weaponLvl = 0; gateOpen = 0; ended = 0; tutStep = 0; tutDist = 0; boss.active = false;
+        for (int i = 0; i < 4; i++) { qStatus[i] = 0; qProg[i] = 0; }
         hp = (float)maxHp(); px = 0; pz = 0; yaw = 0;
         pickups.clear(); msgs.clear(); resetEnemies();
-        msg("A: ANGREIFEN   X: HEILTRANK   Y: INVENTAR");
-        msg("TOETE GEGNER FUER ERFAHRUNG UND BEUTE");
-        msg("AM LAGERFEUER WIRST DU GEHEILT");
-        msg("IN DOERFERN: A = SPRECHEN, TAVERNE = TRINKEN");
     };
     auto usePotion = [&]() {
         if (items[IT_POTION] > 0 && hp < (float)maxHp()) {
             items[IT_POTION]--; hp = fminf((float)maxHp(), hp + 40.0f); msg("HEILTRANK GETRUNKEN");
         } else if (items[IT_POTION] <= 0) msg("KEIN HEILTRANK");
+    };
+
+    Quest quests[4] = {
+        {"SCHATTENJAGD", "",
+         "Seit der Koenig in die Schwarze Festung\nzog, kommen die Schatten jede Nacht.|Ich bitte dich: Erlege 8 Schattenwesen,\ndamit unser Dorf wieder ruhig schlaeft.|Ich zahle dir, was ich habe.",
+         "Noch nicht genug Schattenwesen erlegt.\nSie lauern ausserhalb der Doerfer.",
+         "Ihr Ritter seid ein Segen! Hier, nimm das.\nDie Schatten lassen uns heute Nacht in Ruhe.|Geh weiter nach Rabenhorst. Dort lebt\nein Schmied, der deine Hilfe braucht.",
+         "Danke nochmal, Ritter. Die Nacht ist\nruhiger geworden."},
+        {"FEUER DER SCHMIEDE", "",
+         "Meine Schmiede ist kalt, seit die Erze\nvon den Schatten bewacht werden.|Bring mir einen Seelensplitter, dann\nschmiede ich dein Schwert neu.",
+         "Ohne Seelensplitter bleibt der Ofen kalt.\nSchattenwesen tragen sie manchmal bei sich.",
+         "Ein Seelensplitter! Perfekt.\nGib mir dein Schwert...|So. Das ist Echtstahl, getraenkt im Licht.\nDu wirst es beim Zuschlagen merken.",
+         "Gutes Schwert, was? Pass gut darauf auf."},
+        {"DER SCHWARZE PFAD", "",
+         "Ich sehe ein Feuer in deiner Zukunft.\nUnd ein schwarzes Tor am Ende der Welt.|Bring mir 2 alte Knochen, und ich zeige\ndir den Weg dorthin.",
+         "Zwei Knochen, Ritter. Die Schatten\nlassen sie manchmal fallen.",
+         "Gut. Die Knochen fluestern mir den Weg.|Das Tor liegt im Norden, am Rand der Welt.\nIch habe es auf deiner Karte markiert.|Nur drei Seelensplitter oeffnen es.\nUnd dahinter wartet der Koenig.",
+         "Das Tor liegt im Norden. Geh mit Mut,\naber nicht ohne Heiltraenke."},
+        {"DAS SCHWARZE TOR",
+         "Siehst du den Stern ueber dem Moor?\nEr brennt, wenn ein Held geboren wird.|Frag die Moorhexe in Nebelmoor nach dem\nWeg zum Schwarzen Tor. Dann komm zurueck.",
+         "Du kennst also den Weg zum Tor.|Mein Grossvater sagte: Wer den Koenig\nbesiegt, bricht den Fluch der Schatten.|Sammle drei Seelensplitter und oeffne\ndas Tor. Das Reich zaehlt auf dich.",
+         "Das Tor wartet im Norden. Drei\nSeelensplitter, vergiss das nicht.",
+         "",
+         "Du hast es geschafft! Das Licht kehrt\nzurueck. Danke, Ritter."}
+    };
+    auto questReady = [&](int q) -> bool {
+        if (q == 0) return qProg[0] >= 8;
+        if (q == 1) return items[IT_SHARD] >= 1;
+        if (q == 2) return items[IT_BONE] >= 2;
+        return false;
+    };
+    auto completeQuest = [&](int q) {
+        if (q == 0) { gold += 30; items[IT_POTION]++; addXp(30); }
+        else if (q == 1) { items[IT_SHARD]--; weaponLvl++; gold += 20; addXp(30); msg("DEIN SCHWERT IST NEU GESCHMIEDET: ANGRIFF +1"); }
+        else if (q == 2) { items[IT_BONE] -= 2; gold += 10; addXp(40); msg("DAS SCHWARZE TOR IST AUF DER KARTE"); }
+        qStatus[q] = 2;
+        msg(std::string("AUFGABE ERLEDIGT: ") + quests[q].name);
+    };
+    auto setupBoss = [&]() {
+        boss.active = (gateOpen != 0 && ended == 0);
+        boss.hp = BOSS_HP; boss.x = GATE_X; boss.z = GATE_Z - 8.0f; boss.flash = 0;
+    };
+    auto objective = [&]() -> std::string {
+        char b[80];
+        if (boss.active) return "BESIEGE DEN SCHATTENKOENIG";
+        if (ended) return "DAS REICH IST GERETTET";
+        if (qStatus[0] == 1) { snprintf(b, sizeof b, "SCHATTENJAGD: %d/8 ERLEGT", qProg[0]); return b; }
+        if (qStatus[1] == 1) return "BRING EINEN SEELENSPLITTER ZUM SCHMIED";
+        if (qStatus[2] == 1) return "BRING 2 KNOCHEN ZUR MOORHEXE";
+        if (qStatus[2] >= 2 && !gateOpen) return "OEFFNE DAS TOR IM NORDEN (3 SPLITTER)";
+        return "SPRICH MIT DEN BEWOHNERN";
     };
 
     Uint32 last = SDL_GetTicks();
@@ -689,6 +797,7 @@ int main(int argc, char** argv) {
         if (k[SDL_SCANCODE_Q]) cur.x = true;
         if (k[SDL_SCANCODE_I]) cur.y = true;
         if (k[SDL_SCANCODE_M]) cur.start = true;
+        if (k[SDL_SCANCODE_J]) cur.select = true;
         if (ly < -0.6f) cur.up = true;
         if (ly > 0.6f) cur.down = true;
         Pad pr;
@@ -696,6 +805,7 @@ int main(int argc, char** argv) {
         pr.a = cur.a && !prev.a; pr.b = cur.b && !prev.b;
         pr.x = cur.x && !prev.x; pr.y = cur.y && !prev.y;
         pr.start = cur.start && !prev.start;
+        pr.select = cur.select && !prev.select;
         prev = cur;
 
         if (cur.start && cur.select) run = false;
@@ -710,9 +820,9 @@ int main(int argc, char** argv) {
             if (pr.up) menuSel = (menuSel + 2) % 3;
             if (pr.down) menuSel = (menuSel + 1) % 3;
             if (pr.a) {
-                if (menuSel == 0) { newGame(); state = ST_PLAY; atkCd = 0.5f; nearFireIdx = -1; curVillage = -1; drunk = 0; }
+                if (menuSel == 0) { newGame(); storyPages = splitPages(INTRO_TEXT); talkPage = 0; storyEnd = 0; state = ST_STORY; nearFireIdx = -1; curVillage = -1; drunk = 0; }
                 else if (menuSel == 1 && hasSave) {
-                    if (loadGame()) { pickups.clear(); msgs.clear(); resetEnemies(); state = ST_PLAY; atkCd = 0.5f; nearFireIdx = -1; curVillage = -1; drunk = 0; }
+                    if (loadGame()) { pickups.clear(); msgs.clear(); resetEnemies(); setupBoss(); state = ST_PLAY; atkCd = 0.5f; nearFireIdx = -1; curVillage = -1; drunk = 0; }
                 } else if (menuSel == 2) run = false;
             }
         } else if (state == ST_INV) {
@@ -720,10 +830,23 @@ int main(int argc, char** argv) {
             if (pr.down) invSel = (invSel + 1) % IT_COUNT;
             if (pr.a && invSel == IT_POTION) usePotion();
             if (pr.y || pr.b) { state = ST_PLAY; atkCd = 0.3f; }
+        } else if (state == ST_STORY) {
+            if (pr.a) {
+                talkPage++;
+                if (talkPage >= (int)storyPages.size()) {
+                    if (storyEnd == 1) { state = ST_MENU; menuSel = 1; hasSave = true; }
+                    else { state = ST_PLAY; atkCd = 0.5f; }
+                }
+            }
+        } else if (state == ST_QUESTS) {
+            if (pr.select || pr.b || pr.y) { state = ST_PLAY; atkCd = 0.3f; }
         } else if (state == ST_TALK) {
             if (pr.a) {
                 talkPage++;
                 if (talkPage >= (int)curPages.size()) {
+                    if (talkEvent == 1 && talkQuest >= 0) { qStatus[talkQuest] = 1; msg(std::string("NEUE AUFGABE: ") + quests[talkQuest].name); }
+                    else if (talkEvent == 2 && talkQuest >= 0) completeQuest(talkQuest);
+                    talkEvent = 0;
                     if (talkRumor || (talkNpc >= 0 && npcs[talkNpc].kind == 1)) { state = ST_TAVERN; talkRumor = false; }
                     else { state = ST_PLAY; atkCd = 0.4f; }
                 }
@@ -751,7 +874,8 @@ int main(int argc, char** argv) {
                 } else { state = ST_PLAY; atkCd = 0.4f; }
             }
         } else {
-            if (pr.y) state = ST_INV;
+            if (pr.y) { state = ST_INV; if (tutStep == 3) tutStep = 4; }
+            if (pr.select && !cur.start) state = ST_QUESTS;
             if (pr.x) usePotion();
             if (pr.start && !cur.select) { saveGame(); hasSave = true; state = ST_MENU; menuSel = 1; }
 
@@ -764,6 +888,7 @@ int main(int argc, char** argv) {
             if (ml > 0.05f) {
                 if (ml > 1) { mx /= ml; mz /= ml; ml = 1; }
                 px += mx * 6.0f * dt; pz += mz * 6.0f * dt; walk += 9.0f * dt;
+                tutDist += ml * 6.0f * dt; if (tutStep == 0 && tutDist > 8.0f) tutStep = 1;
                 face = atan2f(mx, mz);
             }
             px = clampf(px, -120.f, 120.f); pz = clampf(pz, -120.f, 120.f);
@@ -771,6 +896,13 @@ int main(int argc, char** argv) {
                 float dx = px - colliders[i].x, dz = pz - colliders[i].z, d = sqrtf(dx * dx + dz * dz);
                 float rr = colliders[i].r + 0.5f;
                 if (d < rr && d > 0.001f) { px = colliders[i].x + dx / d * rr; pz = colliders[i].z + dz / d * rr; }
+            }
+            if (!gateOpen) {                                     // geschlossene Tuer des Tors
+                for (size_t i = 0; i < gateCols.size(); i++) {
+                    float dx = px - gateCols[i].x, dz = pz - gateCols[i].z, d = sqrtf(dx * dx + dz * dz);
+                    float rr = gateCols[i].r + 0.5f;
+                    if (d < rr && d > 0.001f) { px = gateCols[i].x + dx / d * rr; pz = gateCols[i].z + dz / d * rr; }
+                }
             }
             py = height(px, pz);
 
@@ -782,11 +914,30 @@ int main(int argc, char** argv) {
                 if (d2 < bestD) { bestD = d2; nearNpcIdx = (int)i; }
             }
 
+            float gdx = px - GATE_X, gdz = pz - GATE_Z;
+            nearGate = (!gateOpen && gdx * gdx + gdz * gdz < 64.0f);
             atkCd -= dt; swing -= dt;
             if (nearNpcIdx >= 0 && pr.a) {
-                talkNpc = nearNpcIdx; talkPage = 0; talkRumor = false;
-                curPages = npcs[nearNpcIdx].pages; curName = npcs[nearNpcIdx].name;
+                const Npc& n = npcs[nearNpcIdx];
+                talkNpc = nearNpcIdx; talkPage = 0; talkRumor = false; talkEvent = 0; talkQuest = n.quest;
+                curName = n.name;
+                if (n.quest < 0) curPages = n.pages;
+                else {
+                    const Quest& q = quests[n.quest];
+                    if (qStatus[n.quest] == 0) {
+                        if (n.quest == 3 && qStatus[2] < 2) curPages = splitPages(q.pre);
+                        else { curPages = splitPages(q.offer); talkEvent = 1; }
+                    } else if (qStatus[n.quest] == 1) {
+                        if (questReady(n.quest)) { curPages = splitPages(q.done); talkEvent = 2; }
+                        else curPages = splitPages(q.remind);
+                    } else curPages = splitPages(q.after);
+                }
                 state = ST_TALK;
+            } else if (nearGate && pr.a) {
+                if (items[IT_SHARD] >= 3) {
+                    items[IT_SHARD] -= 3; gateOpen = 1; setupBoss();
+                    msg("DAS SCHWARZE TOR OEFFNET SICH...");
+                } else msg("VERSCHLOSSEN. DREI SEELENSPLITTER NOETIG.");
             } else if (atk && atkCd <= 0 && nearNpcIdx < 0) {
                 atkCd = 0.5f; swing = 0.2f;
                 for (size_t i = 0; i < enemies.size(); i++) {
@@ -797,6 +948,10 @@ int main(int argc, char** argv) {
                         if (d > 0.01f) { e.x += dx / d * 1.5f; e.z += dz / d * 1.5f; }
                     }
                 }
+                if (boss.active) {
+                    float dx = boss.x - px, dz = boss.z - pz, d = sqrtf(dx * dx + dz * dz);
+                    if (d < 4.2f && (dx * sinf(face) + dz * cosf(face)) > -0.5f) { boss.hp -= (float)dmgVal(); boss.flash = 0.2f; }
+                }
             }
 
             // Gegner (in Doerfern ist es sicher)
@@ -806,6 +961,8 @@ int main(int argc, char** argv) {
                 if (e.hp <= 0) {
                     int coins = 3 + rand() % 6;
                     addXp(10); gold += coins;
+                    if (tutStep == 1) tutStep = 2;
+                    if (qStatus[0] == 1 && qProg[0] < 8) { qProg[0]++; char qb[48]; snprintf(qb, sizeof qb, "SCHATTENJAGD %d/8", qProg[0]); msg(qb); }
                     char b[64]; snprintf(b, sizeof b, "+10 EP   +%d MUENZEN", coins);
                     msg(b);
                     float r = frand();
@@ -826,11 +983,26 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // Schattenkoenig
+            if (boss.active) {
+                boss.flash -= dt;
+                float dx = px - boss.x, dz = pz - boss.z, d = sqrtf(dx * dx + dz * dz);
+                if (d > 2.4f) { boss.x += dx / d * 2.6f * dt; boss.z += dz / d * 2.6f * dt; }
+                else hp -= 30.0f * dt;
+                boss.x = clampf(boss.x, -120.f, 120.f); boss.z = clampf(boss.z, -120.f, 120.f);
+                if (boss.hp <= 0) {
+                    boss.active = false; ended = 1; qStatus[3] = 2; addXp(100); gold += 100;
+                    saveGame(); hasSave = true;
+                    storyPages = splitPages(OUTRO_TEXT); talkPage = 0; storyEnd = 1; state = ST_STORY;
+                }
+            }
+
             // Beute einsammeln
             for (size_t i = 0; i < pickups.size();) {
                 float dx = pickups[i].x - px, dz = pickups[i].z - pz;
                 if (dx * dx + dz * dz < 2.0f) {
                     items[pickups[i].item]++;
+                    if (tutStep == 2) tutStep = 3;
                     char b[48]; snprintf(b, sizeof b, "+1 %s", ITEM_NAME[pickups[i].item]);
                     msg(b);
                     pickups.erase(pickups.begin() + i);
@@ -841,6 +1013,7 @@ int main(int argc, char** argv) {
             if (hp <= 0) {
                 hp = (float)maxHp(); px = FIRES[lastFire].x + 2.5f; pz = FIRES[lastFire].z + 1.5f;
                 resetEnemies(); msg("DU BIST GESTORBEN");
+                if (boss.active) { boss.hp = BOSS_HP; boss.x = GATE_X; boss.z = GATE_Z - 8.0f; }
             }
 
             // Rastplaetze: heilen, speichern, Respawn-Punkt merken
@@ -863,6 +1036,7 @@ int main(int argc, char** argv) {
                 if (vdx * vdx + vdz * vdz < 400.0f) vi = v;
             }
             if (vi != curVillage) { if (vi >= 0) msg(VILLAGES[vi].name); curVillage = vi; }
+            if (vi >= 0 && tutStep == 4) { tutStep = 5; gold += 10; msg("TUTORIAL GESCHAFFT: +10 MUENZEN"); }
             if (drunk > 0) drunk -= dt;
         }
 
@@ -928,6 +1102,38 @@ int main(int argc, char** argv) {
             float dx = px - npcs[i].x, dz = pz - npcs[i].z;
             if (state != ST_MENU && dx * dx + dz * dz < 100.0f) fa = atan2f(dx, dz);
             drawNpc(cube, npcs[i], tm, fa);
+        }
+
+        {   // Das Schwarze Tor
+            float gy = height(GATE_X, GATE_Z);
+            drawMesh(cube, model(GATE_X - 4.2f, gy + 4.0f, GATE_Z, 0, 1.6f, 10.0f, 1.6f), 0, 0.17f, 0.17f, 0.20f);
+            drawMesh(cube, model(GATE_X + 4.2f, gy + 4.0f, GATE_Z, 0, 1.6f, 10.0f, 1.6f), 0, 0.17f, 0.17f, 0.20f);
+            drawMesh(cube, model(GATE_X, gy + 9.0f, GATE_Z, 0, 11.0f, 1.6f, 2.0f), 0, 0.15f, 0.15f, 0.18f);
+            for (int sg = -1; sg <= 1; sg += 2)
+                drawMesh(cube, model(GATE_X + sg * 4.2f, gy + 10.1f, GATE_Z + 0.8f, tm * 2.0f, 0.5f, 0.8f * flick + 0.3f, 0.5f), tm * 2.0f, 1.0f, 0.5f, 0.1f);
+            if (!gateOpen) {
+                drawMesh(cube, model(GATE_X, gy + 3.2f, GATE_Z, 0, 6.8f, 7.0f, 0.7f), 0, 0.04f, 0.03f, 0.06f);
+                float pul = 0.7f + 0.3f * sinf(tm * 2.0f);
+                for (int i = -1; i <= 1; i++)
+                    drawMesh(cube, model(GATE_X + i * 1.8f, gy + 3.4f + (i == 0 ? 0.8f : 0.0f), GATE_Z + 0.4f, 0, 0.5f, 1.4f, 0.1f), 0, 1.4f * pul, 0.3f, 1.8f * pul);
+            }
+        }
+        if (boss.active) {
+            float by2 = height(boss.x, boss.z), ba = atan2f(px - boss.x, pz - boss.z);
+            float fl2 = boss.flash > 0 ? 0.6f : 0.0f, cb2 = cosf(ba), sb2 = sinf(ba);
+            auto bpart = [&](float lx, float ly, float lz, float sx, float sy, float sz, float r, float g, float b) {
+                float wx = boss.x + lx * cb2 + lz * sb2, wz = boss.z - lx * sb2 + lz * cb2;
+                drawMesh(cube, model(wx, by2 + ly, wz, ba, sx, sy, sz), ba, r, g, b);
+            };
+            bpart(0, 1.8f, 0, 2.2f, 3.6f, 1.8f, 0.22f + fl2, 0.04f + fl2, 0.28f + fl2);
+            bpart(0, 4.4f, 0, 1.3f, 1.3f, 1.3f, 0.25f + fl2, 0.05f + fl2, 0.30f + fl2);
+            bpart(-1.7f, 2.2f, 0, 0.8f, 2.8f, 0.8f, 0.20f + fl2, 0.04f + fl2, 0.25f + fl2);
+            bpart( 1.7f, 2.2f, 0, 0.8f, 2.8f, 0.8f, 0.20f + fl2, 0.04f + fl2, 0.25f + fl2);
+            bpart(-0.3f, 4.5f, 0.66f, 0.25f, 0.2f, 0.1f, 2.0f, 0.2f, 0.2f);
+            bpart( 0.3f, 4.5f, 0.66f, 0.25f, 0.2f, 0.1f, 2.0f, 0.2f, 0.2f);
+            bpart(-0.45f, 5.3f, 0, 0.3f, 0.6f, 0.3f, 1.6f, 1.2f, 0.3f);
+            bpart(0, 5.4f, 0, 0.3f, 0.8f, 0.3f, 1.6f, 1.2f, 0.3f);
+            bpart( 0.45f, 5.3f, 0, 0.3f, 0.6f, 0.3f, 1.6f, 1.2f, 0.3f);
         }
 
         if (state == ST_MENU) {
@@ -1011,7 +1217,31 @@ int main(int argc, char** argv) {
                     rect(mx0 + (FIRES[f].x + 128) * kk - 1, my0 + (FIRES[f].z + 128) * kk - 1, 2, 2, 1.0f, 0.5f, 0.1f, 1.0f);
                 for (int v = 0; v < 3; v++)
                     rect(mx0 + (VILLAGES[v].x + 128) * kk - 2, my0 + (VILLAGES[v].z + 128) * kk - 2, 4, 4, 1.0f, 0.85f, 0.3f, 1.0f);
+                if (qStatus[2] >= 2 || gateOpen)
+                    rect(mx0 + (GATE_X + 128) * kk - 2, my0 + (GATE_Z + 128) * kk - 2, 4, 4, 0.8f, 0.3f, 1.0f, 1.0f);
                 rect(mx0 + (px + 128) * kk - 1.5f, my0 + (pz + 128) * kk - 1.5f, 3, 3, 1.0f, 1.0f, 1.0f, 1.0f);
+            }
+            if (state == ST_PLAY && nearGate && nearNpcIdx < 0) {
+                const char* gt = items[IT_SHARD] >= 3 ? "A: TOR OEFFNEN (3 SEELENSPLITTER)" : "VERSCHLOSSENES TOR - 3 SEELENSPLITTER NOETIG";
+                text(gt, (320 - textWidth(gt, 1)) / 2, 204, 1, 0.85f, 0.5f, 1.0f);
+            }
+            if (state == ST_PLAY && tutStep < 5) {
+                static const char* TUT[5] = {
+                    "LINKER STICK: LAUFEN   RECHTER STICK: KAMERA",
+                    "A: ANGREIFEN - BESIEGE EIN SCHATTENWESEN",
+                    "LAUF UEBER DIE BEUTE, UM SIE AUFZUHEBEN",
+                    "Y: INVENTAR OEFFNEN   X: HEILTRANK TRINKEN",
+                    "FINDE EIN DORF - GELBE PUNKTE AUF DER KARTE" };
+                rect(14, 178, 292, 14, 0.0f, 0.0f, 0.0f, 0.6f);
+                text(TUT[tutStep], (320 - textWidth(TUT[tutStep], 1)) / 2, 181, 1, 1.0f, 0.9f, 0.5f);
+            } else if (tutStep >= 5) {
+                std::string ob = std::string("AUFGABE: ") + objective();
+                text(ob.c_str(), 8, 214, 1, 0.85f, 0.85f, 0.6f);
+            }
+            if (boss.active) {
+                text("SCHATTENKOENIG", (320 - textWidth("SCHATTENKOENIG", 1)) / 2, 160, 1, 0.9f, 0.4f, 1.0f);
+                rect(80, 171, 160, 8, 0, 0, 0, 0.7f);
+                rect(81, 172, 158.0f * clampf(boss.hp / BOSS_HP, 0, 1), 6, 0.6f, 0.1f, 0.7f, 1.0f);
             }
         }
         if (state == ST_INV) {
@@ -1032,6 +1262,42 @@ int main(int argc, char** argv) {
             }
             text(ITEM_DESC[invSel], 60, 150, 1, 0.6f, 0.75f, 0.6f);
             text("A: BENUTZEN    Y: ZURUECK", 60, 184, 1, 0.5f, 0.5f, 0.6f);
+        }
+        if (state == ST_STORY) {
+            rect(0, 0, 320, 240, 0.0f, 0.0f, 0.02f, 0.93f);
+            const std::string& pg = storyPages[talkPage < (int)storyPages.size() ? talkPage : 0];
+            if (storyEnd == 1 && talkPage >= (int)storyPages.size() - 1) {
+                text("ENDE", (320 - textWidth("ENDE", 4)) / 2, 50, 4, 0.9f, 0.8f, 0.5f);
+            }
+            float ty = 100.0f; size_t st = 0;
+            while (st <= pg.size()) {
+                size_t e = pg.find('\n', st);
+                std::string ln = pg.substr(st, e == std::string::npos ? std::string::npos : e - st);
+                text(ln.c_str(), (320 - textWidth(ln.c_str(), 1)) / 2, ty, 1, 0.85f, 0.85f, 0.9f);
+                ty += 14.0f;
+                if (e == std::string::npos) break;
+                st = e + 1;
+            }
+            text("A: WEITER", (320 - textWidth("A: WEITER", 1)) / 2, 212, 1, 0.45f, 0.45f, 0.55f);
+        }
+        if (state == ST_QUESTS) {
+            rect(0, 0, 320, 240, 0, 0, 0, 0.5f);
+            rect(28, 30, 264, 180, 0.5f, 0.4f, 0.25f, 1.0f);
+            rect(30, 32, 260, 176, 0.04f, 0.04f, 0.06f, 0.96f);
+            text("AUFGABEN", 42, 40, 2, 0.9f, 0.8f, 0.55f);
+            for (int q = 0; q < 4; q++) {
+                float ty = 68.0f + q * 30.0f;
+                if (qStatus[q] == 0) { text("???", 42, ty, 1, 0.4f, 0.4f, 0.45f); continue; }
+                bool dn = (qStatus[q] >= 2);
+                text(quests[q].name, 42, ty, 1, dn ? 0.5f : 1.0f, dn ? 0.9f : 0.8f, dn ? 0.5f : 0.3f);
+                if (dn) snprintf(buf, sizeof buf, "ERLEDIGT");
+                else if (q == 0) snprintf(buf, sizeof buf, "ERLEGE 8 SCHATTENWESEN: %d/8", qProg[0]);
+                else if (q == 1) snprintf(buf, sizeof buf, "BRING EINEN SPLITTER (DU HAST %d)", items[IT_SHARD]);
+                else if (q == 2) snprintf(buf, sizeof buf, "BRING 2 KNOCHEN (DU HAST %d)", items[IT_BONE]);
+                else snprintf(buf, sizeof buf, "OEFFNE DAS TOR: 3 SPLITTER (DU HAST %d)", items[IT_SHARD]);
+                text(buf, 50, ty + 11, 1, 0.65f, 0.65f, 0.75f);
+            }
+            text("SELECT ODER B: ZURUECK", 42, 192, 1, 0.5f, 0.5f, 0.6f);
         }
         if (state == ST_TALK) {
             rect(8, 148, 304, 84, 0.5f, 0.4f, 0.25f, 1.0f);
