@@ -261,8 +261,33 @@ static Mesh makeCube() {
 }
 
 // ---------- Welt ----------
-static float height(float x, float z) {
+struct Village { float x, z; const char* name; };
+static const Village VILLAGES[3] = {
+    {-48.0f, 36.0f, "ASCHENFURT"}, {58.0f, 52.0f, "RABENHORST"}, {-62.0f, -58.0f, "NEBELMOOR"} };
+
+struct Fire { float x, z; const char* name; };
+static const int NFIRES = 7;
+static const Fire FIRES[NFIRES] = {
+    {8.0f, -6.0f, "STARTLAGER"}, {-48.0f, 36.0f, "ASCHENFURT"}, {58.0f, 52.0f, "RABENHORST"},
+    {-62.0f, -58.0f, "NEBELMOOR"}, {-20.0f, -48.0f, "RASTPLATZ"}, {38.0f, 20.0f, "RASTPLATZ"},
+    {80.0f, -35.0f, "RASTPLATZ"} };
+
+static float rawHeight(float x, float z) {
     return 3.0f * sinf(x * 0.08f) * cosf(z * 0.07f) + 1.5f * sinf(x * 0.19f + z * 0.13f) + 0.6f * sinf(z * 0.31f);
+}
+
+// Um die Doerfer wird das Gelaende flach, damit die Haeuser gerade stehen
+static float height(float x, float z) {
+    float h = rawHeight(x, z);
+    for (int i = 0; i < 3; i++) {
+        float dx = x - VILLAGES[i].x, dz = z - VILLAGES[i].z, d = sqrtf(dx * dx + dz * dz);
+        if (d < 22.0f) {
+            float t = d < 14.0f ? 1.0f : 1.0f - (d - 14.0f) / 8.0f;
+            t = t * t * (3.0f - 2.0f * t);
+            h = h * (1.0f - t) + rawHeight(VILLAGES[i].x, VILLAGES[i].z) * t;
+        }
+    }
+    return h;
 }
 
 static float frand() { return rand() / (float)RAND_MAX; }
@@ -309,7 +334,7 @@ enum Item { IT_POTION, IT_BONE, IT_SHARD, IT_COUNT };
 static const char* ITEM_NAME[IT_COUNT] = {"HEILTRANK", "KNOCHEN", "SEELENSPLITTER"};
 static const char* ITEM_DESC[IT_COUNT] = {"HEILT 40 LEBEN", "EIN ALTER KNOCHEN", "SCHIMMERT SCHWACH VIOLETT"};
 
-static int level = 1, xp = 0;
+static int level = 1, xp = 0, gold = 0, lastFire = 0;
 static int items[IT_COUNT] = {2, 0, 0};
 static float hp = 100;
 static float px = 0, pz = 0;
@@ -339,7 +364,7 @@ static bool saveExists() { FILE* f = fopen(SAVE_FILE, "r"); if (f) { fclose(f); 
 static bool saveGame() {
     FILE* f = fopen(SAVE_FILE, "w");
     if (!f) return false;
-    fprintf(f, "%d %d %d %d %d %.2f %.2f\n", level, xp, items[0], items[1], items[2], px, pz);
+    fprintf(f, "V2 %d %d %d %d %d %d %d %.2f %.2f\n", level, xp, items[0], items[1], items[2], gold, lastFire, px, pz);
     fclose(f);
     return true;
 }
@@ -347,12 +372,20 @@ static bool saveGame() {
 static bool loadGame() {
     FILE* f = fopen(SAVE_FILE, "r");
     if (!f) return false;
-    int l, x, a, b, c; float X, Z;
-    int n = fscanf(f, "%d %d %d %d %d %f %f", &l, &x, &a, &b, &c, &X, &Z);
+    char line[200];
+    if (!fgets(line, sizeof line, f)) { fclose(f); return false; }
     fclose(f);
-    if (n != 7) return false;
+    int l, x, a, b, c, g = 0, lf = 0, n; float X, Z;
+    if (strncmp(line, "V2 ", 3) == 0) {
+        n = sscanf(line + 3, "%d %d %d %d %d %d %d %f %f", &l, &x, &a, &b, &c, &g, &lf, &X, &Z);
+        if (n != 9) return false;
+    } else {
+        n = sscanf(line, "%d %d %d %d %d %f %f", &l, &x, &a, &b, &c, &X, &Z);
+        if (n != 7) return false;
+    }
     level = l < 1 ? 1 : (l > 20 ? 20 : l); xp = x < 0 ? 0 : x;
     items[0] = a; items[1] = b; items[2] = c;
+    gold = g < 0 ? 0 : g; lastFire = (lf < 0 || lf >= NFIRES) ? 0 : lf;
     px = clampf(X, -120.f, 120.f); pz = clampf(Z, -120.f, 120.f);
     hp = (float)maxHp();
     return true;
@@ -362,10 +395,21 @@ struct Tree { float x, z; };
 struct Enemy { float x, z, hp, flash; };
 struct Pickup { float x, z; int item; };
 
+static bool inVillage(float x, float z, float r) {
+    for (int i = 0; i < 3; i++) {
+        float dx = x - VILLAGES[i].x, dz = z - VILLAGES[i].z;
+        if (dx * dx + dz * dz < r * r) return true;
+    }
+    return false;
+}
+
 static void respawn(Enemy& e, float cx, float cz) {
-    float a = frand() * 6.2831f, d = 30.0f + frand() * 30.0f;
-    e.x = clampf(cx + cosf(a) * d, -120.f, 120.f);
-    e.z = clampf(cz + sinf(a) * d, -120.f, 120.f);
+    for (int t = 0; t < 12; t++) {
+        float a = frand() * 6.2831f, d = 30.0f + frand() * 30.0f;
+        e.x = clampf(cx + cosf(a) * d, -120.f, 120.f);
+        e.z = clampf(cz + sinf(a) * d, -120.f, 120.f);
+        if (!inVillage(e.x, e.z, 28.0f)) break;
+    }
     e.hp = (float)(3 + (level - 1) / 3); e.flash = 0;
 }
 
@@ -393,6 +437,46 @@ static void drawKnight(const Mesh& cube, float kx, float kz, float face, float s
     else part(-0.7f, 1.2f, 0.5f, 0.1f, 0.1f, 1.3f, 0.7f, 0.7f, 0.8f);
 }
 
+// ---------- Doerfer ----------
+struct House { float x, z, w, d, h, rot; bool tavern; float cr, cg, cb; };
+struct Collider { float x, z, r; };
+struct Npc { float x, z, face; const char* name; int kind; float cr, cg, cb; std::vector<std::string> pages; };
+
+static void localToWorld(float cx, float cz, float rot, float lx, float lz, float& wx, float& wz) {
+    wx = cx + lx * cosf(rot) + lz * sinf(rot);
+    wz = cz - lx * sinf(rot) + lz * cosf(rot);
+}
+
+static void drawHouse(const Mesh& cube, const House& hs, float tm) {
+    float gy = height(hs.x, hs.z);
+    auto part = [&](float lx, float ly, float lz, float sx, float sy, float sz, float r, float g, float b) {
+        float wx, wz; localToWorld(hs.x, hs.z, hs.rot, lx, lz, wx, wz);
+        drawMesh(cube, model(wx, gy + ly, wz, hs.rot, sx, sy, sz), hs.rot, r, g, b);
+    };
+    part(0, hs.h * 0.5f, 0, hs.w, hs.h, hs.d, hs.cr, hs.cg, hs.cb);
+    part(0, hs.h + 0.25f, 0, hs.w + 0.9f, 0.5f, hs.d + 0.9f, 0.16f, 0.10f, 0.08f);
+    part(0, hs.h + 0.75f, 0, hs.w * 0.7f, 0.5f, hs.d * 0.7f, 0.14f, 0.09f, 0.07f);
+    part(hs.w * 0.3f, hs.h + 1.4f, -hs.d * 0.2f, 0.6f, 1.6f, 0.6f, 0.30f, 0.28f, 0.27f);
+    part(0, 1.0f, hs.d * 0.5f + 0.05f, 1.2f, 2.0f, 0.15f, 0.12f, 0.07f, 0.04f);
+    part(-hs.w * 0.32f, hs.h * 0.6f, hs.d * 0.5f + 0.05f, 0.8f, 0.8f, 0.12f, 1.8f, 1.0f, 0.3f);
+    part( hs.w * 0.32f, hs.h * 0.6f, hs.d * 0.5f + 0.05f, 0.8f, 0.8f, 0.12f, 1.8f, 1.0f, 0.3f);
+    if (hs.tavern) {
+        float wx, wz;
+        localToWorld(hs.x, hs.z, hs.rot, -hs.w * 0.5f - 1.0f, hs.d * 0.5f + 0.6f, wx, wz);
+        drawMesh(cube, model(wx, gy + 1.6f, wz, hs.rot, 0.2f, 3.2f, 0.2f), hs.rot, 0.20f, 0.12f, 0.06f);
+        float sw = hs.rot + sinf(tm * 1.6f) * 0.25f;   // schaukelndes Wirtshausschild
+        drawMesh(cube, model(wx, gy + 2.9f, wz, sw, 1.5f, 0.9f, 0.12f), sw, 0.45f, 0.28f, 0.12f);
+        drawMesh(cube, model(wx, gy + 2.9f, wz, sw, 0.5f, 0.5f, 0.2f), sw, 0.9f, 0.75f, 0.3f);
+    }
+}
+
+static void drawNpc(const Mesh& cube, const Npc& n, float tm, float face) {
+    float y = height(n.x, n.z) + 0.03f * sinf(tm * 2.0f + n.x);
+    drawMesh(cube, model(n.x, y + 0.4f, n.z, face, 0.5f, 0.8f, 0.35f), face, 0.25f, 0.20f, 0.18f);
+    drawMesh(cube, model(n.x, y + 1.2f, n.z, face, 0.75f, 0.9f, 0.45f), face, n.cr, n.cg, n.cb);
+    drawMesh(cube, model(n.x, y + 1.9f, n.z, face, 0.45f, 0.45f, 0.45f), face, 0.85f, 0.68f, 0.52f);
+}
+
 // ---------- Eingabe ----------
 struct Pad { bool up = false, down = false, a = false, b = false, x = false, y = false, start = false, select = false; };
 
@@ -405,7 +489,7 @@ static float joyVal(SDL_Joystick* j, int a) {
     return fabsf(v) < 0.2f ? 0.0f : v;
 }
 
-enum State { ST_MENU, ST_PLAY, ST_INV };
+enum State { ST_MENU, ST_PLAY, ST_INV, ST_TALK, ST_TAVERN };
 
 int main(int argc, char** argv) {
     bool windowed = false;
@@ -470,14 +554,74 @@ int main(int argc, char** argv) {
     std::vector<Tree> trees;
     while (trees.size() < 80) {
         float x = (frand() - 0.5f) * 230, z = (frand() - 0.5f) * 230;
-        if (x * x + z * z > 36) { Tree t; t.x = x; t.z = z; trees.push_back(t); }
+        bool ok = (x * x + z * z > 36) && !inVillage(x, z, 24.0f);
+        for (int f = 0; f < NFIRES; f++) {
+            float dx = x - FIRES[f].x, dz = z - FIRES[f].z;
+            if (dx * dx + dz * dz < 16.0f) ok = false;
+        }
+        if (ok) { Tree t; t.x = x; t.z = z; trees.push_back(t); }
     }
     const float bx = 8.0f, bz = -6.0f;   // Lagerfeuer
     std::vector<Enemy> enemies(6);
     std::vector<Pickup> pickups;
+
+    // Doerfer: 5 Haeuser im Kreis (das erste ist die Taverne), NPCs, Kollisionen
+    std::vector<House> houses;
+    std::vector<Collider> colliders;
+    std::vector<Npc> npcs;
+    for (int v = 0; v < 3; v++) {
+        float vx = VILLAGES[v].x, vz = VILLAGES[v].z;
+        for (int k = 0; k < 5; k++) {
+            float a = 6.2831f * k / 5.0f + v * 0.7f;
+            House hs;
+            hs.x = vx + cosf(a) * 12.0f; hs.z = vz + sinf(a) * 12.0f;
+            hs.tavern = (k == 0);
+            hs.w = hs.tavern ? 7.0f : 5.0f; hs.d = hs.tavern ? 5.0f : 4.0f; hs.h = hs.tavern ? 3.6f : 3.0f;
+            hs.rot = atan2f(vx - hs.x, vz - hs.z);
+            hs.cr = hs.tavern ? 0.30f : 0.22f + 0.03f * k; hs.cg = hs.tavern ? 0.20f : 0.19f; hs.cb = hs.tavern ? 0.13f : 0.17f;
+            houses.push_back(hs);
+            Collider c; c.x = hs.x; c.z = hs.z; c.r = (hs.w > hs.d ? hs.w : hs.d) * 0.5f + 0.8f;
+            colliders.push_back(c);
+        }
+    }
+    auto addNpc = [&](float x, float z, const char* name, int kind, float cr, float cg, float cb, const std::string& text) {
+        Npc n; n.x = x; n.z = z; n.face = 0; n.name = name; n.kind = kind; n.cr = cr; n.cg = cg; n.cb = cb;
+        size_t pos = 0;
+        while (true) {
+            size_t e = text.find('|', pos);
+            if (e == std::string::npos) { n.pages.push_back(text.substr(pos)); break; }
+            n.pages.push_back(text.substr(pos, e - pos)); pos = e + 1;
+        }
+        npcs.push_back(n);
+    };
+    static const char* KEEPER_NAME[3] = {"WIRT BORIN", "WIRTIN HILDE", "WIRT OLAF"};
+    static const char* KEEPER_TEXT[3] = {
+        "Willkommen im Krug zur Asche, Fremder!\nSetz dich ans Feuer, du siehst muede aus.|Trink einen Met, bevor die Nacht kommt.",
+        "Na, wen haben wir da? Ein Ritter!\nDer Met ist heute besonders gut.|Setz dich, die Schatten bleiben draussen.",
+        "Ein Gast! Seit Wochen kam keiner mehr\ndurch das Moor. Komm herein, komm herein.|Hier ist es warm und trocken." };
+    static const char* V1_NAME[3] = {"MARTA", "SCHMIED TORSTEN", "MOORHEXE IRMA"};
+    static const char* V1_TEXT[3] = {
+        "Seit der Koenig in die Schwarze Festung\nzog, kommen die Schatten jede Nacht.|Geh nachts nicht ohne Licht in den Wald.\nBleib in der Naehe der Lagerfeuer.",
+        "Meine Schmiede ist kalt, seit die Erze\nvon den Schatten bewacht werden.|Bring mir Seelensplitter, dann reden wir.",
+        "Ich sehe ein Feuer in deiner Zukunft.\nUnd ein schwarzes Tor am Ende der Welt.|Haeng nicht an deinem Leben, Ritter." };
+    static const char* V2_NAME[3] = {"ALTER GREGOR", "KIND LENA", "WAECHTER BRAND"};
+    static const char* V2_TEXT[3] = {
+        "Siehst du den Stern ueber dem Moor?\nMein Grossvater sagte, er brennt, wenn\nein Held geboren wird.|Vielleicht bist du das.",
+        "Die Schattenwesen werden staerker, wenn\nman selbst schwach ist.|Mama sagt, du musst erst Erfahrung sammeln!",
+        "Die Wege sind sicher bis zum Dorfrand.\nDahinter lauern die Schattenwesen.|Nimm immer einen Heiltrank mit." };
+    for (int v = 0; v < 3; v++) {
+        const House& th = houses[v * 5];
+        addNpc(th.x + sinf(th.rot) * 4.6f, th.z + cosf(th.rot) * 4.6f, KEEPER_NAME[v], 1, 0.55f, 0.25f, 0.15f, KEEPER_TEXT[v]);
+        addNpc(VILLAGES[v].x + 3.4f, VILLAGES[v].z + 2.6f, V1_NAME[v], 0, 0.20f, 0.30f, 0.50f, V1_TEXT[v]);
+        addNpc(VILLAGES[v].x - 3.8f, VILLAGES[v].z - 1.8f, V2_NAME[v], 0, 0.35f, 0.40f, 0.22f, V2_TEXT[v]);
+    }
     float face = 0, yaw = 0, atkCd = 0, swing = 0, tm = 0, walk = 0;
-    bool nearFire = false;
-    int menuSel = 0, invSel = 0;
+    int nearFireIdx = -1, curVillage = -1, nearNpcIdx = -1;
+    int menuSel = 0, invSel = 0, tavernSel = 0, talkNpc = -1, talkPage = 0;
+    bool talkRumor = false;
+    float drunk = 0;
+    std::vector<std::string> curPages;
+    std::string curName;
     State state = ST_MENU;
     bool hasSave = saveExists();
     menuSel = hasSave ? 1 : 0;
@@ -485,12 +629,13 @@ int main(int argc, char** argv) {
 
     auto resetEnemies = [&]() { for (size_t i = 0; i < enemies.size(); i++) respawn(enemies[i], px, pz); };
     auto newGame = [&]() {
-        level = 1; xp = 0; items[0] = 2; items[1] = 0; items[2] = 0;
+        level = 1; xp = 0; items[0] = 2; items[1] = 0; items[2] = 0; gold = 0; lastFire = 0;
         hp = (float)maxHp(); px = 0; pz = 0; yaw = 0;
         pickups.clear(); msgs.clear(); resetEnemies();
         msg("A: ANGREIFEN   X: HEILTRANK   Y: INVENTAR");
         msg("TOETE GEGNER FUER ERFAHRUNG UND BEUTE");
         msg("AM LAGERFEUER WIRST DU GEHEILT");
+        msg("IN DOERFERN: A = SPRECHEN, TAVERNE = TRINKEN");
     };
     auto usePotion = [&]() {
         if (items[IT_POTION] > 0 && hp < (float)maxHp()) {
@@ -565,9 +710,9 @@ int main(int argc, char** argv) {
             if (pr.up) menuSel = (menuSel + 2) % 3;
             if (pr.down) menuSel = (menuSel + 1) % 3;
             if (pr.a) {
-                if (menuSel == 0) { newGame(); state = ST_PLAY; atkCd = 0.5f; nearFire = false; }
+                if (menuSel == 0) { newGame(); state = ST_PLAY; atkCd = 0.5f; nearFireIdx = -1; curVillage = -1; drunk = 0; }
                 else if (menuSel == 1 && hasSave) {
-                    if (loadGame()) { pickups.clear(); msgs.clear(); resetEnemies(); state = ST_PLAY; atkCd = 0.5f; nearFire = false; }
+                    if (loadGame()) { pickups.clear(); msgs.clear(); resetEnemies(); state = ST_PLAY; atkCd = 0.5f; nearFireIdx = -1; curVillage = -1; drunk = 0; }
                 } else if (menuSel == 2) run = false;
             }
         } else if (state == ST_INV) {
@@ -575,6 +720,36 @@ int main(int argc, char** argv) {
             if (pr.down) invSel = (invSel + 1) % IT_COUNT;
             if (pr.a && invSel == IT_POTION) usePotion();
             if (pr.y || pr.b) { state = ST_PLAY; atkCd = 0.3f; }
+        } else if (state == ST_TALK) {
+            if (pr.a) {
+                talkPage++;
+                if (talkPage >= (int)curPages.size()) {
+                    if (talkRumor || (talkNpc >= 0 && npcs[talkNpc].kind == 1)) { state = ST_TAVERN; talkRumor = false; }
+                    else { state = ST_PLAY; atkCd = 0.4f; }
+                }
+            }
+        } else if (state == ST_TAVERN) {
+            if (pr.up) tavernSel = (tavernSel + 3) % 4;
+            if (pr.down) tavernSel = (tavernSel + 1) % 4;
+            if (pr.b) { state = ST_PLAY; atkCd = 0.4f; }
+            else if (pr.a) {
+                if (tavernSel == 0) {
+                    if (gold >= 5) { gold -= 5; hp = fminf((float)maxHp(), hp + 50.0f); drunk = 25.0f; msg("DER MET WAERMT DICH. PROST!"); }
+                    else msg("ZU WENIG MUENZEN");
+                } else if (tavernSel == 1) {
+                    if (gold >= 15) { gold -= 15; items[IT_POTION]++; msg("+1 HEILTRANK GEKAUFT"); }
+                    else msg("ZU WENIG MUENZEN");
+                } else if (tavernSel == 2) {
+                    static const char* RUMORS[5] = {
+                        "Man sagt, in der Schwarzen Festung\nbrennt noch Licht, obwohl niemand lebt.",
+                        "Ein Reisender erzaehlte von einem Tor,\ndas sich nur mit Seelensplittern oeffnet.",
+                        "Die Lagerfeuer im Wald sind alte Zeichen.\nSie halten die Schatten fern.",
+                        "Wer zu viel Met trinkt, sieht den Koenig\ntanzen. Frag nicht, woher ich das weiss.",
+                        "Die drei Doerfer waren einst ein Reich,\nbevor die Dunkelheit kam." };
+                    curPages.clear(); curPages.push_back(RUMORS[rand() % 5]);
+                    curName = "GEMURMEL IN DER TAVERNE"; talkPage = 0; talkRumor = true; state = ST_TALK;
+                } else { state = ST_PLAY; atkCd = 0.4f; }
+            }
         } else {
             if (pr.y) state = ST_INV;
             if (pr.x) usePotion();
@@ -592,10 +767,27 @@ int main(int argc, char** argv) {
                 face = atan2f(mx, mz);
             }
             px = clampf(px, -120.f, 120.f); pz = clampf(pz, -120.f, 120.f);
+            for (size_t i = 0; i < colliders.size(); i++) {      // gegen Haeuser laufen
+                float dx = px - colliders[i].x, dz = pz - colliders[i].z, d = sqrtf(dx * dx + dz * dz);
+                float rr = colliders[i].r + 0.5f;
+                if (d < rr && d > 0.001f) { px = colliders[i].x + dx / d * rr; pz = colliders[i].z + dz / d * rr; }
+            }
             py = height(px, pz);
 
+            // Person zum Reden in der Naehe?
+            nearNpcIdx = -1;
+            float bestD = 9.0f;
+            for (size_t i = 0; i < npcs.size(); i++) {
+                float dx = npcs[i].x - px, dz = npcs[i].z - pz, d2 = dx * dx + dz * dz;
+                if (d2 < bestD) { bestD = d2; nearNpcIdx = (int)i; }
+            }
+
             atkCd -= dt; swing -= dt;
-            if (atk && atkCd <= 0) {
+            if (nearNpcIdx >= 0 && pr.a) {
+                talkNpc = nearNpcIdx; talkPage = 0; talkRumor = false;
+                curPages = npcs[nearNpcIdx].pages; curName = npcs[nearNpcIdx].name;
+                state = ST_TALK;
+            } else if (atk && atkCd <= 0 && nearNpcIdx < 0) {
                 atkCd = 0.5f; swing = 0.2f;
                 for (size_t i = 0; i < enemies.size(); i++) {
                     Enemy& e = enemies[i];
@@ -607,12 +799,14 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Gegner
+            // Gegner (in Doerfern ist es sicher)
+            bool safe = inVillage(px, pz, 16.0f);
             for (size_t i = 0; i < enemies.size(); i++) {
                 Enemy& e = enemies[i];
                 if (e.hp <= 0) {
-                    addXp(10);
-                    char b[48]; snprintf(b, sizeof b, "+10 EP");
+                    int coins = 3 + rand() % 6;
+                    addXp(10); gold += coins;
+                    char b[64]; snprintf(b, sizeof b, "+10 EP   +%d MUENZEN", coins);
                     msg(b);
                     float r = frand();
                     int drop = r < 0.35f ? IT_POTION : (r < 0.70f ? IT_BONE : (r < 0.85f ? IT_SHARD : -1));
@@ -621,9 +815,15 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 e.flash -= dt;
+                for (int v = 0; v < 3; v++) {                       // Gegner bleiben aus Doerfern draussen
+                    float vx = e.x - VILLAGES[v].x, vz = e.z - VILLAGES[v].z, vd = sqrtf(vx * vx + vz * vz);
+                    if (vd < 15.0f && vd > 0.01f) { e.x += vx / vd * 3.0f * dt; e.z += vz / vd * 3.0f * dt; }
+                }
                 float dx = px - e.x, dz = pz - e.z, d = sqrtf(dx * dx + dz * dz);
-                if (d < 25.0f && d > 0.8f) { e.x += dx / d * 2.2f * dt; e.z += dz / d * 2.2f * dt; }
-                if (d < 1.4f) hp -= 20.0f * dt;
+                if (!safe) {
+                    if (d < 25.0f && d > 0.8f) { e.x += dx / d * 2.2f * dt; e.z += dz / d * 2.2f * dt; }
+                    if (d < 1.4f) hp -= 20.0f * dt;
+                }
             }
 
             // Beute einsammeln
@@ -637,18 +837,33 @@ int main(int argc, char** argv) {
                 } else i++;
             }
 
-            // Tod
+            // Tod: am letzten Rastplatz wieder aufwachen
             if (hp <= 0) {
-                hp = (float)maxHp(); px = bx - 3.0f; pz = bz + 1.0f;
+                hp = (float)maxHp(); px = FIRES[lastFire].x + 2.5f; pz = FIRES[lastFire].z + 1.5f;
                 resetEnemies(); msg("DU BIST GESTORBEN");
             }
 
-            // Lagerfeuer: heilen & speichern
-            float fdx = px - bx, fdz = pz - bz;
-            bool inFire = fdx * fdx + fdz * fdz < 25.0f;
-            hp = fminf(hp + (inFire ? 25.0f : 2.0f) * dt, (float)maxHp());
-            if (inFire && !nearFire) { if (saveGame()) { hasSave = true; msg("SPIELSTAND GESPEICHERT"); } }
-            nearFire = inFire;
+            // Rastplaetze: heilen, speichern, Respawn-Punkt merken
+            int inFireIdx = -1;
+            for (int f = 0; f < NFIRES; f++) {
+                float fdx = px - FIRES[f].x, fdz = pz - FIRES[f].z;
+                if (fdx * fdx + fdz * fdz < 25.0f) { inFireIdx = f; break; }
+            }
+            hp = fminf(hp + (inFireIdx >= 0 ? 25.0f : 2.0f) * dt, (float)maxHp());
+            if (inFireIdx >= 0 && inFireIdx != nearFireIdx) {
+                lastFire = inFireIdx;
+                if (saveGame()) { hasSave = true; msg("RASTPLATZ: SPIELSTAND GESPEICHERT"); }
+            }
+            nearFireIdx = inFireIdx;
+
+            // Dorf betreten
+            int vi = -1;
+            for (int v = 0; v < 3; v++) {
+                float vdx = px - VILLAGES[v].x, vdz = pz - VILLAGES[v].z;
+                if (vdx * vdx + vdz * vdz < 400.0f) vi = v;
+            }
+            if (vi != curVillage) { if (vi >= 0) msg(VILLAGES[vi].name); curVillage = vi; }
+            if (drunk > 0) drunk -= dt;
         }
 
         // --- Kamera ---
@@ -660,7 +875,8 @@ int main(int argc, char** argv) {
             camY = height(camX, camZ) + 4.5f;
             tgX = bx; tgY = by + 1.3f; tgZ = bz;
         } else {
-            camX = px + sinf(yaw) * 9.0f; camZ = pz + cosf(yaw) * 9.0f;
+            float yv = yaw + sinf(tm * 1.3f) * 0.18f * clampf(drunk / 6.0f, 0.0f, 1.0f);
+            camX = px + sinf(yv) * 9.0f; camZ = pz + cosf(yv) * 9.0f;
             camY = fmaxf(height(camX, camZ) + 1.5f, py + 5.0f);
             tgX = px; tgY = py + 1.2f; tgZ = pz;
         }
@@ -676,7 +892,12 @@ int main(int argc, char** argv) {
         glUniformMatrix4fv(uVP, 1, GL_FALSE, vp.m);
         glUniform3f(uCam, camX, camY, camZ);
         float flick = 0.85f + 0.15f * sinf(tm * 13.0f) * sinf(tm * 7.3f + 1.0f);
-        glUniform4f(uFire, bx, by + 1.0f, bz, flick);
+        int nf = 0; float nd = 1e9f;                       // naechstes Feuer beleuchtet die Umgebung
+        for (int f = 0; f < NFIRES; f++) {
+            float dx = tgX - FIRES[f].x, dz = tgZ - FIRES[f].z, d2 = dx * dx + dz * dz;
+            if (d2 < nd) { nd = d2; nf = f; }
+        }
+        glUniform4f(uFire, FIRES[nf].x, height(FIRES[nf].x, FIRES[nf].z) + 1.0f, FIRES[nf].z, flick);
         glUniform1f(uFogMul, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -694,11 +915,20 @@ int main(int argc, char** argv) {
             drawMesh(cube, model(t.x, ty + 5.8f, t.z, 1.8f, 1.0f, 1.8f, 1.0f), 1.8f, 0.05f, 0.14f, 0.11f);
         }
 
-        // Lagerfeuer
-        drawMesh(cube, model(bx, by + 0.15f, bz, 0.5f, 1.4f, 0.3f, 0.3f), 0.5f, 0.2f, 0.12f, 0.06f);
-        drawMesh(cube, model(bx, by + 0.15f, bz, 2.1f, 1.4f, 0.3f, 0.3f), 2.1f, 0.2f, 0.12f, 0.06f);
-        drawMesh(cube, model(bx, by + 0.7f, bz, tm * 2.0f, 0.5f, 0.9f * flick + 0.3f, 0.5f), tm * 2.0f, 1.0f, 0.55f, 0.1f);
-        drawMesh(cube, model(bx, by + 1.2f, bz, -tm * 3.0f, 0.25f, 0.6f * flick, 0.25f), -tm * 3.0f, 1.0f, 0.8f, 0.3f);
+        for (int f = 0; f < NFIRES; f++) {
+            float fx = FIRES[f].x, fz = FIRES[f].z, fy = height(fx, fz);
+            drawMesh(cube, model(fx, fy + 0.15f, fz, 0.5f, 1.4f, 0.3f, 0.3f), 0.5f, 0.2f, 0.12f, 0.06f);
+            drawMesh(cube, model(fx, fy + 0.15f, fz, 2.1f, 1.4f, 0.3f, 0.3f), 2.1f, 0.2f, 0.12f, 0.06f);
+            drawMesh(cube, model(fx, fy + 0.7f, fz, tm * 2.0f, 0.5f, 0.9f * flick + 0.3f, 0.5f), tm * 2.0f, 1.0f, 0.55f, 0.1f);
+            drawMesh(cube, model(fx, fy + 1.2f, fz, -tm * 3.0f, 0.25f, 0.6f * flick, 0.25f), -tm * 3.0f, 1.0f, 0.8f, 0.3f);
+        }
+        for (size_t i = 0; i < houses.size(); i++) drawHouse(cube, houses[i], tm);
+        for (size_t i = 0; i < npcs.size(); i++) {
+            float fa = npcs[i].face;
+            float dx = px - npcs[i].x, dz = pz - npcs[i].z;
+            if (state != ST_MENU && dx * dx + dz * dz < 100.0f) fa = atan2f(dx, dz);
+            drawNpc(cube, npcs[i], tm, fa);
+        }
 
         if (state == ST_MENU) {
             float kx = bx - 2.4f, kz = bz + 0.6f;
@@ -763,11 +993,25 @@ int main(int argc, char** argv) {
             rect(40, 23, 100.0f * clampf((float)xp / (float)xpNeed(), 0, 1), 3, 0.3f, 0.5f, 0.95f, 1.0f);
             snprintf(buf, sizeof buf, "EP %d/%d", xp, xpNeed());
             text(buf, 146, 20, 1, 0.6f, 0.7f, 1.0f);
-            snprintf(buf, sizeof buf, "X: HEILTRANK %d", items[IT_POTION]);
+            snprintf(buf, sizeof buf, "X: HEILTRANK %d   MUENZEN %d", items[IT_POTION], gold);
             text(buf, 8, 226, 1, 0.8f, 0.8f, 0.85f);
             for (size_t i = 0; i < msgs.size(); i++) {
                 float al = clampf(msgs[i].second, 0.0f, 1.0f);
                 text(msgs[i].first.c_str(), 8, 40.0f + i * 10.0f, 1, 1.0f, 1.0f, 0.85f, al);
+            }
+            if (state == ST_PLAY && nearNpcIdx >= 0) {
+                snprintf(buf, sizeof buf, "A: SPRECHEN MIT %s", npcs[nearNpcIdx].name);
+                text(buf, (320 - textWidth(buf, 1)) / 2, 204, 1, 1.0f, 0.9f, 0.5f);
+            }
+            {   // Minikarte (Norden oben)
+                const float mx0 = 252.0f, my0 = 8.0f, ms = 60.0f, kk = ms / 256.0f;
+                rect(mx0 - 1, my0 - 1, ms + 2, ms + 2, 0.5f, 0.4f, 0.25f, 1.0f);
+                rect(mx0, my0, ms, ms, 0.02f, 0.03f, 0.06f, 0.8f);
+                for (int f = 0; f < NFIRES; f++)
+                    rect(mx0 + (FIRES[f].x + 128) * kk - 1, my0 + (FIRES[f].z + 128) * kk - 1, 2, 2, 1.0f, 0.5f, 0.1f, 1.0f);
+                for (int v = 0; v < 3; v++)
+                    rect(mx0 + (VILLAGES[v].x + 128) * kk - 2, my0 + (VILLAGES[v].z + 128) * kk - 2, 4, 4, 1.0f, 0.85f, 0.3f, 1.0f);
+                rect(mx0 + (px + 128) * kk - 1.5f, my0 + (pz + 128) * kk - 1.5f, 3, 3, 1.0f, 1.0f, 1.0f, 1.0f);
             }
         }
         if (state == ST_INV) {
@@ -775,7 +1019,7 @@ int main(int argc, char** argv) {
             rect(48, 38, 224, 164, 0.5f, 0.4f, 0.25f, 1.0f);
             rect(50, 40, 220, 160, 0.04f, 0.04f, 0.06f, 0.96f);
             text("INVENTAR", 60, 48, 2, 0.9f, 0.8f, 0.55f);
-            snprintf(buf, sizeof buf, "LEVEL %d   ANGRIFF %d", level, dmgVal());
+            snprintf(buf, sizeof buf, "LEVEL %d  ANGRIFF %d  MUENZEN %d", level, dmgVal(), gold);
             text(buf, 60, 70, 1, 0.65f, 0.65f, 0.75f);
             for (int i = 0; i < IT_COUNT; i++) {
                 float ty = 92 + i * 14;
@@ -788,6 +1032,39 @@ int main(int argc, char** argv) {
             }
             text(ITEM_DESC[invSel], 60, 150, 1, 0.6f, 0.75f, 0.6f);
             text("A: BENUTZEN    Y: ZURUECK", 60, 184, 1, 0.5f, 0.5f, 0.6f);
+        }
+        if (state == ST_TALK) {
+            rect(8, 148, 304, 84, 0.5f, 0.4f, 0.25f, 1.0f);
+            rect(10, 150, 300, 80, 0.04f, 0.04f, 0.06f, 0.95f);
+            text(curName.c_str(), 18, 156, 1, 1.0f, 0.8f, 0.4f);
+            const std::string& pg = curPages[talkPage < (int)curPages.size() ? talkPage : 0];
+            float ty = 174.0f; size_t st = 0;
+            while (st <= pg.size()) {
+                size_t e = pg.find('\n', st);
+                std::string ln = pg.substr(st, e == std::string::npos ? std::string::npos : e - st);
+                text(ln.c_str(), 18, ty, 1, 0.9f, 0.9f, 0.95f);
+                ty += 12.0f;
+                if (e == std::string::npos) break;
+                st = e + 1;
+            }
+            text("A: WEITER", 250, 218, 1, 0.5f, 0.5f, 0.6f);
+        }
+        if (state == ST_TAVERN) {
+            rect(0, 0, 320, 240, 0, 0, 0, 0.45f);
+            rect(38, 48, 244, 144, 0.5f, 0.4f, 0.25f, 1.0f);
+            rect(40, 50, 240, 140, 0.04f, 0.04f, 0.06f, 0.96f);
+            text("TAVERNE", 52, 58, 2, 0.9f, 0.8f, 0.55f);
+            snprintf(buf, sizeof buf, "MUENZEN: %d", gold);
+            text(buf, 52, 80, 1, 1.0f, 0.85f, 0.3f);
+            const char* opts[4] = {"MET TRINKEN - 5 MUENZEN", "HEILTRANK KAUFEN - 15 MUENZEN", "GERUECHTE HOEREN", "VERLASSEN"};
+            for (int i = 0; i < 4; i++) {
+                bool sel = (i == tavernSel);
+                float ty = 96.0f + i * 14.0f;
+                if (sel) text(">", 50, ty, 1, 1.0f, 0.7f, 0.25f);
+                text(opts[i], 62, ty, 1, sel ? 1.0f : 0.7f, sel ? 0.7f : 0.7f, sel ? 0.25f : 0.75f);
+            }
+            if (!msgs.empty()) text(msgs.back().first.c_str(), 52, 160, 1, 0.6f, 0.9f, 0.6f);
+            text("A: OK    B: ZURUECK", 52, 176, 1, 0.5f, 0.5f, 0.6f);
         }
         end2D();
 
