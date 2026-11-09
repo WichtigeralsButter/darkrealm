@@ -334,13 +334,13 @@ static Mesh makeStars() {
 }
 
 // ---------- Spieldaten ----------
-enum Item { IT_POTION, IT_BONE, IT_SHARD, IT_COUNT };
-static const char* ITEM_NAME[IT_COUNT] = {"HEILTRANK", "KNOCHEN", "SEELENSPLITTER"};
-static const char* ITEM_DESC[IT_COUNT] = {"HEILT 40 LEBEN", "EIN ALTER KNOCHEN", "SCHIMMERT SCHWACH VIOLETT"};
+enum Item { IT_POTION, IT_BONE, IT_SHARD, IT_ARROW, IT_COUNT };
+static const char* ITEM_NAME[IT_COUNT] = {"HEILTRANK", "KNOCHEN", "SEELENSPLITTER", "PFEILE"};
+static const char* ITEM_DESC[IT_COUNT] = {"HEILT 40 LEBEN", "EIN ALTER KNOCHEN", "SCHIMMERT SCHWACH VIOLETT", "MUNITION FUER DEN BOGEN (L1)"};
 
 static int level = 1, xp = 0, gold = 0, lastFire = 0, weaponLvl = 0, gateOpen = 0, tutStep = 0, ended = 0;
 static int qStatus[4] = {0, 0, 0, 0}, qProg[4] = {0, 0, 0, 0};
-static int items[IT_COUNT] = {2, 0, 0};
+static int items[IT_COUNT] = {2, 0, 0, 0};
 static float hp = 100;
 static float px = 0, pz = 0;
 
@@ -369,7 +369,7 @@ static bool saveExists() { FILE* f = fopen(SAVE_FILE, "r"); if (f) { fclose(f); 
 static bool saveGame() {
     FILE* f = fopen(SAVE_FILE, "w");
     if (!f) return false;
-    fprintf(f, "V3 %d %d %d %d %d %d %d %d", level, xp, items[0], items[1], items[2], gold, lastFire, weaponLvl);
+    fprintf(f, "V4 %d %d %d %d %d %d %d %d %d", level, xp, items[0], items[1], items[2], items[3], gold, lastFire, weaponLvl);
     for (int i = 0; i < 4; i++) fprintf(f, " %d", qStatus[i]);
     for (int i = 0; i < 4; i++) fprintf(f, " %d", qProg[i]);
     fprintf(f, " %d %d %d %.2f %.2f\n", gateOpen, tutStep, ended, px, pz);
@@ -388,10 +388,14 @@ static bool loadGame() {
     if (tk.empty()) return false;
     auto I = [&](size_t i) { return atoi(tk[i].c_str()); };
     auto F = [&](size_t i) { return (float)atof(tk[i].c_str()); };
-    int l = 1, x = 0, a = 0, b = 0, c = 0, g = 0, lf = 0, wl = 0, go = 0, tu = 5, en = 0;
+    int l = 1, x = 0, a = 0, b = 0, c = 0, ar = 10, g = 0, lf = 0, wl = 0, go = 0, tu = 5, en = 0;
     int qs[4] = {0, 0, 0, 0}, qp[4] = {0, 0, 0, 0};
     float X = 0, Z = 0;
-    if (tk[0] == "V3" && tk.size() == 22) {
+    if (tk[0] == "V4" && tk.size() == 23) {
+        l = I(1); x = I(2); a = I(3); b = I(4); c = I(5); ar = I(6); g = I(7); lf = I(8); wl = I(9);
+        for (int i = 0; i < 4; i++) { qs[i] = I(10 + i); qp[i] = I(14 + i); }
+        go = I(18); tu = I(19); en = I(20); X = F(21); Z = F(22);
+    } else if (tk[0] == "V3" && tk.size() == 22) {
         l = I(1); x = I(2); a = I(3); b = I(4); c = I(5); g = I(6); lf = I(7); wl = I(8);
         for (int i = 0; i < 4; i++) { qs[i] = I(9 + i); qp[i] = I(13 + i); }
         go = I(17); tu = I(18); en = I(19); X = F(20); Z = F(21);
@@ -401,7 +405,7 @@ static bool loadGame() {
         l = I(0); x = I(1); a = I(2); b = I(3); c = I(4); X = F(5); Z = F(6);
     } else return false;
     level = l < 1 ? 1 : (l > 20 ? 20 : l); xp = x < 0 ? 0 : x;
-    items[0] = a; items[1] = b; items[2] = c;
+    items[0] = a; items[1] = b; items[2] = c; items[3] = ar < 0 ? 0 : ar;
     gold = g < 0 ? 0 : g; lastFire = (lf < 0 || lf >= NFIRES) ? 0 : lf;
     weaponLvl = wl < 0 ? 0 : wl;
     for (int i = 0; i < 4; i++) { qStatus[i] = qs[i]; qProg[i] = qp[i]; }
@@ -412,8 +416,9 @@ static bool loadGame() {
 }
 
 struct Tree { float x, z; };
-struct Enemy { float x, z, hp, flash; };
+struct Enemy { float x, z, hp, flash; int type; float speed, dps, reach; };
 struct Pickup { float x, z; int item; };
+struct Arrow { float x, z, dx, dz, life; };
 
 static bool inVillage(float x, float z, float r) {
     for (int i = 0; i < 3; i++) {
@@ -430,7 +435,14 @@ static void respawn(Enemy& e, float cx, float cz) {
         e.z = clampf(cz + sinf(a) * d, -120.f, 120.f);
         if (!inVillage(e.x, e.z, 28.0f)) break;
     }
-    e.hp = (float)(3 + (level - 1) / 3); e.flash = 0;
+    float tr = frand();                                   // 0 = Schattenwolf, 1 = Ghul, 2 = Skelett
+    e.type = tr < 0.4f ? 0 : (tr < 0.75f ? 1 : 2);
+    int base = e.type == 0 ? 2 : (e.type == 1 ? 4 : 3);
+    e.hp = (float)(base + (level - 1) / 3);
+    e.speed = e.type == 0 ? 3.4f : (e.type == 1 ? 2.0f : 2.4f);
+    e.dps = e.type == 0 ? 14.0f : (e.type == 1 ? 22.0f : 25.0f);
+    e.reach = e.type == 0 ? 1.6f : (e.type == 1 ? 1.7f : 2.0f);
+    e.flash = 0;
 }
 
 static std::vector<std::string> splitPages(const char* text) {
@@ -460,12 +472,13 @@ static const char* OUTRO_TEXT =
     "DANKE FUERS SPIELEN!";
 
 // ---------- Ritter ----------
-static void drawKnight(const Mesh& cube, float kx, float kz, float face, float step, bool swing, float dmg) {
+static void drawKnight(const Mesh& cube, float kx, float kz, float face, float step, bool swing, float dmg,
+                       bool block = false, float squash = 1.0f, float bowT = 0.0f) {
     float ky = height(kx, kz);
     float cf = cosf(face), sf = sinf(face);
     auto part = [&](float lx, float ly, float lz, float sx, float sy, float sz, float r, float g, float b) {
         float wx = kx + lx * cf + lz * sf, wz = kz - lx * sf + lz * cf;
-        drawMesh(cube, model(wx, ky + ly, wz, face, sx, sy, sz), face,
+        drawMesh(cube, model(wx, ky + ly * squash, wz, face, sx, sy * squash, sz), face,
                  r * (1.0f + dmg * 0.8f), g * (1.0f - dmg * 0.6f), b * (1.0f - dmg * 0.6f));
     };
     part(-0.22f, 0.45f, step, 0.3f, 0.9f, 0.32f, 0.33f, 0.35f, 0.40f);
@@ -478,9 +491,67 @@ static void drawKnight(const Mesh& cube, float kx, float kz, float face, float s
     part(0, 2.05f, 0, 0.52f, 0.55f, 0.52f, 0.55f, 0.58f, 0.63f);
     part(0, 2.05f, 0.27f, 0.34f, 0.07f, 0.06f, 0.02f, 0.02f, 0.03f);
     part(0, 1.4f, -0.36f, 0.95f, 1.5f, 0.1f, 0.5f, 0.32f, 0.12f);
-    part(0.85f, 1.2f, 0.2f, 0.1f, 0.85f, 0.6f, 0.28f, 0.22f, 0.18f);
+    if (block) {   // Schild vor dem Koerper
+        part(0.2f, 1.35f, 0.68f, 1.05f, 1.3f, 0.14f, 0.30f, 0.24f, 0.20f);
+        part(0.2f, 1.35f, 0.75f, 0.45f, 0.45f, 0.06f, 0.85f, 0.7f, 0.3f);
+    } else {
+        part(0.85f, 1.2f, 0.2f, 0.1f, 0.85f, 0.6f, 0.28f, 0.22f, 0.18f);
+    }
     if (swing) part(-0.65f, 1.3f, 1.3f, 0.12f, 0.12f, 1.9f, 0.85f, 0.85f, 0.95f);
     else part(-0.7f, 1.2f, 0.5f, 0.1f, 0.1f, 1.3f, 0.7f, 0.7f, 0.8f);
+    if (bowT > 0) {   // Bogen
+        part(-0.8f, 1.35f, 0.55f, 0.1f, 1.5f, 0.1f, 0.35f, 0.22f, 0.10f);
+        part(-0.8f, 1.35f, 0.45f, 0.03f, 1.4f, 0.03f, 0.9f, 0.9f, 0.8f);
+    }
+}
+
+// Monster: 0 = Schattenwolf, 1 = Ghul, 2 = Skelett-Krieger
+static void drawEnemy(const Mesh& cube, const Enemy& e, float face, float tm) {
+    float ey = height(e.x, e.z);
+    float cf = cosf(face), sf = sinf(face);
+    float f = e.flash > 0 ? 0.7f : 0.0f;
+    float sw = sinf(tm * (e.type == 0 ? 11.0f : 6.0f) + e.x * 3.0f);
+    auto part = [&](float lx, float ly, float lz, float sx, float sy, float sz, float r, float g, float b) {
+        float wx = e.x + lx * cf + lz * sf, wz = e.z - lx * sf + lz * cf;
+        drawMesh(cube, model(wx, ey + ly, wz, face, sx, sy, sz), face, r + f, g + f, b + f);
+    };
+    if (e.type == 0) {
+        part(0, 0.95f, 0, 0.7f, 0.65f, 1.5f, 0.10f, 0.10f, 0.14f);              // Koerper
+        part(0, 1.2f, 1.0f, 0.55f, 0.5f, 0.6f, 0.12f, 0.12f, 0.16f);            // Kopf
+        part(0, 1.1f, 1.45f, 0.3f, 0.25f, 0.45f, 0.08f, 0.08f, 0.10f);          // Schnauze
+        part(-0.2f, 1.6f, 0.95f, 0.14f, 0.28f, 0.12f, 0.10f, 0.10f, 0.14f);     // Ohren
+        part( 0.2f, 1.6f, 0.95f, 0.14f, 0.28f, 0.12f, 0.10f, 0.10f, 0.14f);
+        part(-0.14f, 1.3f, 1.28f, 0.1f, 0.08f, 0.06f, 2.0f, 0.5f, 0.1f);        // glimmende Augen
+        part( 0.14f, 1.3f, 1.28f, 0.1f, 0.08f, 0.06f, 2.0f, 0.5f, 0.1f);
+        part(0, 1.15f, -1.05f, 0.18f, 0.18f, 0.9f, 0.09f, 0.09f, 0.12f);        // Schwanz
+        part(-0.25f, 0.4f, 0.5f + sw * 0.25f, 0.2f, 0.8f, 0.2f, 0.08f, 0.08f, 0.10f);   // Beine
+        part( 0.25f, 0.4f, 0.5f - sw * 0.25f, 0.2f, 0.8f, 0.2f, 0.08f, 0.08f, 0.10f);
+        part(-0.25f, 0.4f, -0.5f - sw * 0.25f, 0.2f, 0.8f, 0.2f, 0.08f, 0.08f, 0.10f);
+        part( 0.25f, 0.4f, -0.5f + sw * 0.25f, 0.2f, 0.8f, 0.2f, 0.08f, 0.08f, 0.10f);
+    } else if (e.type == 1) {
+        part(0, 1.0f, 0, 0.8f, 1.1f, 0.55f, 0.28f, 0.34f, 0.28f);               // gebeugter Torso
+        part(0, 1.75f, 0.35f, 0.5f, 0.5f, 0.5f, 0.32f, 0.38f, 0.30f);           // Kopf
+        part(-0.14f, 1.8f, 0.62f, 0.1f, 0.08f, 0.06f, 1.8f, 1.6f, 0.2f);        // gelbe Augen
+        part( 0.14f, 1.8f, 0.62f, 0.1f, 0.08f, 0.06f, 1.8f, 1.6f, 0.2f);
+        part(-0.55f, 0.9f, 0.35f + sw * 0.3f, 0.2f, 1.4f, 0.2f, 0.26f, 0.32f, 0.26f);   // lange Arme
+        part( 0.55f, 0.9f, 0.35f - sw * 0.3f, 0.2f, 1.4f, 0.2f, 0.26f, 0.32f, 0.26f);
+        part(-0.55f, 0.2f, 0.35f + sw * 0.3f, 0.14f, 0.14f, 0.4f, 0.8f, 0.8f, 0.7f);    // Klauen
+        part( 0.55f, 0.2f, 0.35f - sw * 0.3f, 0.14f, 0.14f, 0.4f, 0.8f, 0.8f, 0.7f);
+        part(-0.22f, 0.45f, sw * 0.2f, 0.28f, 0.9f, 0.3f, 0.20f, 0.24f, 0.20f);         // Beine
+        part( 0.22f, 0.45f, -sw * 0.2f, 0.28f, 0.9f, 0.3f, 0.20f, 0.24f, 0.20f);
+    } else {
+        part(0, 1.35f, 0, 0.55f, 0.8f, 0.28f, 0.78f, 0.75f, 0.66f);             // Rippen
+        part(0, 0.95f, 0, 0.5f, 0.2f, 0.25f, 0.70f, 0.68f, 0.60f);              // Becken
+        part(0, 2.0f, 0, 0.45f, 0.45f, 0.45f, 0.82f, 0.80f, 0.72f);             // Schaedel
+        part(-0.11f, 2.05f, 0.23f, 0.12f, 0.12f, 0.06f, 0.3f, 1.4f, 1.8f);      // kalte Augen
+        part( 0.11f, 2.05f, 0.23f, 0.12f, 0.12f, 0.06f, 0.3f, 1.4f, 1.8f);
+        part(-0.4f, 1.3f, -sw * 0.2f, 0.12f, 0.8f, 0.12f, 0.75f, 0.72f, 0.64f); // Arme
+        part( 0.4f, 1.3f, sw * 0.2f, 0.12f, 0.8f, 0.12f, 0.75f, 0.72f, 0.64f);
+        part(-0.16f, 0.5f, sw * 0.2f, 0.14f, 1.0f, 0.14f, 0.75f, 0.72f, 0.64f); // Beine
+        part( 0.16f, 0.5f, -sw * 0.2f, 0.14f, 1.0f, 0.14f, 0.75f, 0.72f, 0.64f);
+        part(-0.5f, 1.3f, 0.7f, 0.08f, 0.08f, 1.5f, 0.55f, 0.45f, 0.40f);       // rostiges Schwert
+        part(0, 1.2f, -0.25f, 0.6f, 1.0f, 0.06f, 0.12f, 0.10f, 0.12f);          // zerfetzter Umhang
+    }
 }
 
 // ---------- Doerfer ----------
@@ -524,7 +595,7 @@ static void drawNpc(const Mesh& cube, const Npc& n, float tm, float face) {
 }
 
 // ---------- Eingabe ----------
-struct Pad { bool up = false, down = false, a = false, b = false, x = false, y = false, start = false, select = false; };
+struct Pad { bool up = false, down = false, a = false, b = false, x = false, y = false, start = false, select = false, l1 = false, r1 = false; };
 
 static float axisVal(SDL_GameController* p, SDL_GameControllerAxis a) {
     float v = SDL_GameControllerGetAxis(p, a) / 32768.0f;
@@ -609,7 +680,7 @@ int main(int argc, char** argv) {
         if (ok) { Tree t; t.x = x; t.z = z; trees.push_back(t); }
     }
     const float bx = 8.0f, bz = -6.0f;   // Lagerfeuer
-    std::vector<Enemy> enemies(6);
+    std::vector<Enemy> enemies(8);
     std::vector<Pickup> pickups;
 
     // Doerfer: 5 Haeuser im Kreis (das erste ist die Taverne), NPCs, Kollisionen
@@ -677,6 +748,9 @@ int main(int argc, char** argv) {
     std::vector<std::string> curPages;
     std::string curName;
     bool nearGate = false;
+    bool blocking = false;
+    float stamina = 100, rollT = 0, rollDx = 0, rollDz = 1, bowCd = 0, bowAnim = 0, guardBreak = 0;
+    std::vector<Arrow> arrowsV;
     float tutDist = 0;
     int talkEvent = 0, talkQuest = -1, storyEnd = 0;
     std::vector<std::string> storyPages;
@@ -690,6 +764,7 @@ int main(int argc, char** argv) {
     auto newGame = [&]() {
         level = 1; xp = 0; items[0] = 2; items[1] = 0; items[2] = 0; gold = 0; lastFire = 0;
         weaponLvl = 0; gateOpen = 0; ended = 0; tutStep = 0; tutDist = 0; boss.active = false;
+        items[IT_ARROW] = 15; stamina = 100; rollT = 0; guardBreak = 0; bowCd = 0; bowAnim = 0; arrowsV.clear();
         for (int i = 0; i < 4; i++) { qStatus[i] = 0; qProg[i] = 0; }
         hp = (float)maxHp(); px = 0; pz = 0; yaw = 0;
         pickups.clear(); msgs.clear(); resetEnemies();
@@ -777,6 +852,8 @@ int main(int argc, char** argv) {
             cur.y = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y) != 0;
             cur.start = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START) != 0;
             cur.select = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK) != 0;
+            cur.l1 = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+            cur.r1 = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0;
         } else if (joy) {
             lx = joyVal(joy, 0); ly = joyVal(joy, 1); rx = joyVal(joy, 2);
             Uint8 hat = SDL_JoystickGetHat(joy, 0);
@@ -785,6 +862,7 @@ int main(int argc, char** argv) {
             cur.a = atk; cur.b = SDL_JoystickGetButton(joy, 1) != 0;
             cur.x = SDL_JoystickGetButton(joy, 2) != 0; cur.y = SDL_JoystickGetButton(joy, 3) != 0;
             cur.select = SDL_JoystickGetButton(joy, 6) != 0; cur.start = SDL_JoystickGetButton(joy, 7) != 0;
+            cur.l1 = SDL_JoystickGetButton(joy, 4) != 0; cur.r1 = SDL_JoystickGetButton(joy, 5) != 0;
         }
         const Uint8* k = SDL_GetKeyboardState(NULL);
         if (k[SDL_SCANCODE_A]) lx -= 1; if (k[SDL_SCANCODE_D]) lx += 1;
@@ -798,6 +876,9 @@ int main(int argc, char** argv) {
         if (k[SDL_SCANCODE_I]) cur.y = true;
         if (k[SDL_SCANCODE_M]) cur.start = true;
         if (k[SDL_SCANCODE_J]) cur.select = true;
+        if (k[SDL_SCANCODE_E]) cur.l1 = true;
+        if (k[SDL_SCANCODE_LSHIFT]) cur.r1 = true;
+        if (k[SDL_SCANCODE_F]) cur.b = true;
         if (ly < -0.6f) cur.up = true;
         if (ly > 0.6f) cur.down = true;
         Pad pr;
@@ -806,6 +887,7 @@ int main(int argc, char** argv) {
         pr.x = cur.x && !prev.x; pr.y = cur.y && !prev.y;
         pr.start = cur.start && !prev.start;
         pr.select = cur.select && !prev.select;
+        pr.l1 = cur.l1 && !prev.l1; pr.r1 = cur.r1 && !prev.r1;
         prev = cur;
 
         if (cur.start && cur.select) run = false;
@@ -822,7 +904,7 @@ int main(int argc, char** argv) {
             if (pr.a) {
                 if (menuSel == 0) { newGame(); storyPages = splitPages(INTRO_TEXT); talkPage = 0; storyEnd = 0; state = ST_STORY; nearFireIdx = -1; curVillage = -1; drunk = 0; }
                 else if (menuSel == 1 && hasSave) {
-                    if (loadGame()) { pickups.clear(); msgs.clear(); resetEnemies(); setupBoss(); state = ST_PLAY; atkCd = 0.5f; nearFireIdx = -1; curVillage = -1; drunk = 0; }
+                    if (loadGame()) { pickups.clear(); msgs.clear(); resetEnemies(); setupBoss(); stamina = 100; rollT = 0; guardBreak = 0; arrowsV.clear(); state = ST_PLAY; atkCd = 0.5f; nearFireIdx = -1; curVillage = -1; drunk = 0; }
                 } else if (menuSel == 2) run = false;
             }
         } else if (state == ST_INV) {
@@ -885,12 +967,47 @@ int main(int argc, char** argv) {
             float mx = -sinf(yaw) * fwd + cosf(yaw) * str;
             float mz = -cosf(yaw) * fwd - sinf(yaw) * str;
             float ml = sqrtf(mx * mx + mz * mz);
-            if (ml > 0.05f) {
-                if (ml > 1) { mx /= ml; mz /= ml; ml = 1; }
-                px += mx * 6.0f * dt; pz += mz * 6.0f * dt; walk += 9.0f * dt;
-                tutDist += ml * 6.0f * dt; if (tutStep == 0 && tutDist > 8.0f) tutStep = 1;
-                face = atan2f(mx, mz);
+            if (ml > 1) { mx /= ml; mz /= ml; ml = 1; }
+            blocking = cur.b && rollT <= 0 && guardBreak <= 0 && stamina > 0;
+            if (pr.r1 && rollT <= 0 && stamina >= 25.0f) {          // Ausweichrolle
+                rollT = 0.45f; stamina -= 25.0f;
+                if (ml > 0.05f) { rollDx = mx / ml; rollDz = mz / ml; } else { rollDx = sinf(face); rollDz = cosf(face); }
             }
+            if (rollT > 0) {
+                rollT -= dt;
+                px += rollDx * 11.0f * dt; pz += rollDz * 11.0f * dt;
+                face = atan2f(rollDx, rollDz);
+            } else if (ml > 0.05f) {
+                float spd = blocking ? 2.4f : 6.0f;
+                px += mx * spd * dt; pz += mz * spd * dt; walk += 9.0f * dt;
+                tutDist += ml * spd * dt; if (tutStep == 0 && tutDist > 8.0f) tutStep = 1;
+                if (!blocking) face = atan2f(mx, mz);
+            }
+            if (guardBreak > 0) guardBreak -= dt;
+            else if (!blocking && rollT <= 0) stamina = fminf(100.0f, stamina + 30.0f * dt);
+            if (blocking) {                                          // Schild zeigt zum naechsten Gegner
+                float bestD2 = 196.0f; float tx = 0, tz = 0; bool found = false;
+                for (size_t i = 0; i < enemies.size(); i++) {
+                    float dx = enemies[i].x - px, dz = enemies[i].z - pz, d2 = dx * dx + dz * dz;
+                    if (d2 < bestD2) { bestD2 = d2; tx = dx; tz = dz; found = true; }
+                }
+                if (boss.active) {
+                    float dx = boss.x - px, dz = boss.z - pz, d2 = dx * dx + dz * dz;
+                    if (d2 < bestD2) { tx = dx; tz = dz; found = true; }
+                }
+                if (found) face = atan2f(tx, tz);
+            }
+            auto takeHit = [&](float dps, float ex, float ez) {
+                if (rollT > 0) return;                               // waehrend der Rolle unverwundbar
+                float dx = ex - px, dz = ez - pz, d = sqrtf(dx * dx + dz * dz);
+                float dot = d > 0.01f ? (dx * sinf(face) + dz * cosf(face)) / d : 1.0f;
+                float dm = dps * dt;
+                if (blocking && dot > 0.3f) {
+                    dm *= 0.12f; stamina -= 28.0f * dt;
+                    if (stamina <= 0) { stamina = 0; guardBreak = 1.2f; msg("SCHILD DURCHBROCHEN!"); }
+                }
+                hp -= dm;
+            };
             px = clampf(px, -120.f, 120.f); pz = clampf(pz, -120.f, 120.f);
             for (size_t i = 0; i < colliders.size(); i++) {      // gegen Haeuser laufen
                 float dx = px - colliders[i].x, dz = pz - colliders[i].z, d = sqrtf(dx * dx + dz * dz);
@@ -954,19 +1071,59 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // Bogen
+            bowCd -= dt; bowAnim -= dt;
+            if (pr.l1 && bowCd <= 0 && rollT <= 0 && nearNpcIdx < 0) {
+                if (items[IT_ARROW] > 0) {
+                    items[IT_ARROW]--; bowCd = 0.7f; bowAnim = 0.4f;
+                    float adx = sinf(face), adz = cosf(face), bestDot = 0.85f;
+                    for (size_t i = 0; i < enemies.size(); i++) {    // leichte Zielhilfe
+                        float dx = enemies[i].x - px, dz = enemies[i].z - pz, d = sqrtf(dx * dx + dz * dz);
+                        if (d > 0.5f && d < 30.0f) {
+                            float dot = (dx * sinf(face) + dz * cosf(face)) / d;
+                            if (dot > bestDot) { bestDot = dot; adx = dx / d; adz = dz / d; }
+                        }
+                    }
+                    if (boss.active) {
+                        float dx = boss.x - px, dz = boss.z - pz, d = sqrtf(dx * dx + dz * dz);
+                        if (d > 0.5f && d < 40.0f) {
+                            float dot = (dx * sinf(face) + dz * cosf(face)) / d;
+                            if (dot > bestDot) { bestDot = dot; adx = dx / d; adz = dz / d; }
+                        }
+                    }
+                    Arrow ar; ar.x = px; ar.z = pz; ar.dx = adx; ar.dz = adz; ar.life = 1.2f;
+                    arrowsV.push_back(ar);
+                } else msg("KEINE PFEILE MEHR");
+            }
+            for (size_t i = 0; i < arrowsV.size();) {
+                Arrow& ar = arrowsV[i];
+                ar.x += ar.dx * 28.0f * dt; ar.z += ar.dz * 28.0f * dt; ar.life -= dt;
+                bool hit = false;
+                for (size_t j = 0; j < enemies.size() && !hit; j++) {
+                    float dx = enemies[j].x - ar.x, dz = enemies[j].z - ar.z;
+                    if (dx * dx + dz * dz < 1.7f) { enemies[j].hp -= (float)(dmgVal() + 1); enemies[j].flash = 0.2f; hit = true; }
+                }
+                if (!hit && boss.active) {
+                    float dx = boss.x - ar.x, dz = boss.z - ar.z;
+                    if (dx * dx + dz * dz < 5.0f) { boss.hp -= (float)(dmgVal() + 1); boss.flash = 0.2f; hit = true; }
+                }
+                if (hit || ar.life <= 0) arrowsV.erase(arrowsV.begin() + i); else i++;
+            }
+
             // Gegner (in Doerfern ist es sicher)
             bool safe = inVillage(px, pz, 16.0f);
             for (size_t i = 0; i < enemies.size(); i++) {
                 Enemy& e = enemies[i];
                 if (e.hp <= 0) {
                     int coins = 3 + rand() % 6;
-                    addXp(10); gold += coins;
+                    int xpg = e.type == 0 ? 8 : (e.type == 1 ? 14 : 12);
+                    addXp(xpg); gold += coins;
                     if (tutStep == 1) tutStep = 2;
                     if (qStatus[0] == 1 && qProg[0] < 8) { qProg[0]++; char qb[48]; snprintf(qb, sizeof qb, "SCHATTENJAGD %d/8", qProg[0]); msg(qb); }
-                    char b[64]; snprintf(b, sizeof b, "+10 EP   +%d MUENZEN", coins);
+                    char b[64]; snprintf(b, sizeof b, "+%d EP   +%d MUENZEN", xpg, coins);
                     msg(b);
                     float r = frand();
-                    int drop = r < 0.35f ? IT_POTION : (r < 0.70f ? IT_BONE : (r < 0.85f ? IT_SHARD : -1));
+                    int drop = r < 0.25f ? IT_POTION : (r < 0.45f ? IT_BONE : (r < 0.65f ? IT_SHARD : (r < 0.85f ? IT_ARROW : -1)));
                     if (drop >= 0 && pickups.size() < 40) { Pickup p; p.x = e.x; p.z = e.z; p.item = drop; pickups.push_back(p); }
                     respawn(e, px, pz);
                     continue;
@@ -978,8 +1135,8 @@ int main(int argc, char** argv) {
                 }
                 float dx = px - e.x, dz = pz - e.z, d = sqrtf(dx * dx + dz * dz);
                 if (!safe) {
-                    if (d < 25.0f && d > 0.8f) { e.x += dx / d * 2.2f * dt; e.z += dz / d * 2.2f * dt; }
-                    if (d < 1.4f) hp -= 20.0f * dt;
+                    if (d < 25.0f && d > 0.8f) { e.x += dx / d * e.speed * dt; e.z += dz / d * e.speed * dt; }
+                    if (d < e.reach) takeHit(e.dps, e.x, e.z);
                 }
             }
 
@@ -988,7 +1145,7 @@ int main(int argc, char** argv) {
                 boss.flash -= dt;
                 float dx = px - boss.x, dz = pz - boss.z, d = sqrtf(dx * dx + dz * dz);
                 if (d > 2.4f) { boss.x += dx / d * 2.6f * dt; boss.z += dz / d * 2.6f * dt; }
-                else hp -= 30.0f * dt;
+                else takeHit(30.0f, boss.x, boss.z);
                 boss.x = clampf(boss.x, -120.f, 120.f); boss.z = clampf(boss.z, -120.f, 120.f);
                 if (boss.hp <= 0) {
                     boss.active = false; ended = 1; qStatus[3] = 2; addXp(100); gold += 100;
@@ -1001,9 +1158,9 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < pickups.size();) {
                 float dx = pickups[i].x - px, dz = pickups[i].z - pz;
                 if (dx * dx + dz * dz < 2.0f) {
-                    items[pickups[i].item]++;
+                    items[pickups[i].item] += (pickups[i].item == IT_ARROW ? 5 : 1);
                     if (tutStep == 2) tutStep = 3;
-                    char b[48]; snprintf(b, sizeof b, "+1 %s", ITEM_NAME[pickups[i].item]);
+                    char b[48]; snprintf(b, sizeof b, "+%d %s", pickups[i].item == IT_ARROW ? 5 : 1, ITEM_NAME[pickups[i].item]);
                     msg(b);
                     pickups.erase(pickups.begin() + i);
                 } else i++;
@@ -1012,7 +1169,7 @@ int main(int argc, char** argv) {
             // Tod: am letzten Rastplatz wieder aufwachen
             if (hp <= 0) {
                 hp = (float)maxHp(); px = FIRES[lastFire].x + 2.5f; pz = FIRES[lastFire].z + 1.5f;
-                resetEnemies(); msg("DU BIST GESTORBEN");
+                resetEnemies(); msg("DU BIST GESTORBEN"); stamina = 100; guardBreak = 0; rollT = 0;
                 if (boss.active) { boss.hp = BOSS_HP; boss.x = GATE_X; boss.z = GATE_Z - 8.0f; }
             }
 
@@ -1140,23 +1297,27 @@ int main(int argc, char** argv) {
             float kx = bx - 2.4f, kz = bz + 0.6f;
             drawKnight(cube, kx, kz, atan2f(bx - kx, bz - kz), 0.0f, false, 0.0f);
         } else {
-            for (size_t i = 0; i < enemies.size(); i++) {
-                const Enemy& e = enemies[i];
-                float ey = height(e.x, e.z);
-                float a = atan2f(px - e.x, pz - e.z), f = e.flash > 0 ? 1.0f : 0.0f;
-                drawMesh(cube, model(e.x, ey + 0.9f, e.z, a, 1.0f, 1.8f, 1.0f), a, 0.35f + f * 0.6f, 0.05f + f * 0.6f, 0.08f + f * 0.6f);
-            }
+            for (size_t i = 0; i < enemies.size(); i++)
+                drawEnemy(cube, enemies[i], atan2f(px - enemies[i].x, pz - enemies[i].z), tm);
             for (size_t i = 0; i < pickups.size(); i++) {
                 const Pickup& p = pickups[i];
                 float yy = height(p.x, p.z) + 0.6f + 0.15f * sinf(tm * 3.0f + p.x);
                 float cr = 1.4f, cg = 0.2f, cb = 0.25f;
                 if (p.item == IT_BONE) { cr = 1.3f; cg = 1.25f; cb = 1.1f; }
                 if (p.item == IT_SHARD) { cr = 1.0f; cg = 0.5f; cb = 1.5f; }
+                if (p.item == IT_ARROW) { cr = 1.0f; cg = 0.75f; cb = 0.35f; }
                 drawMesh(cube, model(p.x, yy, p.z, tm * 2.0f, 0.35f, 0.35f, 0.35f), tm * 2.0f, cr, cg, cb);
             }
             float dmg = 1.0f - hp / (float)maxHp();
             float step = (fabsf(lx) + fabsf(ly) > 0.1f) ? sinf(walk) * 0.3f : 0.0f;
-            drawKnight(cube, px, pz, face, step, swing > 0, dmg);
+            for (size_t i = 0; i < arrowsV.size(); i++) {
+                const Arrow& ar = arrowsV[i];
+                float ya = height(ar.x, ar.z) + 1.4f, ra = atan2f(ar.dx, ar.dz);
+                drawMesh(cube, model(ar.x, ya, ar.z, ra, 0.07f, 0.07f, 0.9f), ra, 0.45f, 0.30f, 0.15f);
+                drawMesh(cube, model(ar.x + ar.dx * 0.5f, ya, ar.z + ar.dz * 0.5f, ra, 0.14f, 0.14f, 0.22f), ra, 0.8f, 0.8f, 0.9f);
+            }
+            drawKnight(cube, px, pz, face + (rollT > 0 ? rollT * 14.0f : 0.0f), step, swing > 0, dmg,
+                       blocking && state == ST_PLAY, rollT > 0 ? 0.55f : 1.0f, bowAnim);
         }
 
         // --- Zeichnen (2D) ---
@@ -1197,9 +1358,11 @@ int main(int argc, char** argv) {
             text(buf, 44, 9, 1, 1, 1, 1);
             rect(38, 21, 104, 7, 0, 0, 0, 0.6f);
             rect(40, 23, 100.0f * clampf((float)xp / (float)xpNeed(), 0, 1), 3, 0.3f, 0.5f, 0.95f, 1.0f);
+            rect(38, 30, 104, 6, 0, 0, 0, 0.6f);
+            rect(40, 32, 100.0f * clampf(stamina / 100.0f, 0, 1), 2, guardBreak > 0 ? 0.85f : 0.3f, guardBreak > 0 ? 0.3f : 0.8f, 0.3f, 1.0f);
             snprintf(buf, sizeof buf, "EP %d/%d", xp, xpNeed());
             text(buf, 146, 20, 1, 0.6f, 0.7f, 1.0f);
-            snprintf(buf, sizeof buf, "X: HEILTRANK %d   MUENZEN %d", items[IT_POTION], gold);
+            snprintf(buf, sizeof buf, "X: HEILTRANK %d  PFEILE %d  MUENZEN %d", items[IT_POTION], items[IT_ARROW], gold);
             text(buf, 8, 226, 1, 0.8f, 0.8f, 0.85f);
             for (size_t i = 0; i < msgs.size(); i++) {
                 float al = clampf(msgs[i].second, 0.0f, 1.0f);
@@ -1228,7 +1391,7 @@ int main(int argc, char** argv) {
             if (state == ST_PLAY && tutStep < 5) {
                 static const char* TUT[5] = {
                     "LINKER STICK: LAUFEN   RECHTER STICK: KAMERA",
-                    "A: ANGREIFEN - BESIEGE EIN SCHATTENWESEN",
+                    "A: HIEB  B: SCHILD  R1: ROLLE  L1: BOGEN",
                     "LAUF UEBER DIE BEUTE, UM SIE AUFZUHEBEN",
                     "Y: INVENTAR OEFFNEN   X: HEILTRANK TRINKEN",
                     "FINDE EIN DORF - GELBE PUNKTE AUF DER KARTE" };
